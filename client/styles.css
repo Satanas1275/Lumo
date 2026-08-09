@@ -87,12 +87,22 @@ img { display: block; max-width: 100%; }
 
 .nav-link:hover { background: var(--bg-elev); color: var(--text); }
 
-.header-actions {
+/* Regroupe nav-links + header-actions ; poussé à droite sur desktop */
+.header-menu {
+  display: flex;
+  align-items: center;
+  gap: 20px;
   margin-left: auto;
+}
+
+.header-actions {
   display: flex;
   align-items: center;
   gap: 10px;
 }
+
+/* Bouton hamburger : masqué en desktop, affiché en mobile (voir media query) */
+.menu-toggle { display: none; }
 
 /* Barre de recherche */
 .search-bar {
@@ -101,7 +111,6 @@ img { display: block; max-width: 100%; }
   gap: 6px;
   flex: 1;
   max-width: 440px;
-  margin-left: auto;
   margin-right: 8px;
   background: var(--bg-card);
   border: 1px solid var(--border);
@@ -852,9 +861,8 @@ form input:focus, select:focus {
   .detail-poster { max-width: 260px; }
 }
 
-/* Mobile */
-@media (max-width: 720px) {
-  /* Header : logo + actions sur la 1re ligne, recherche sur la 2e */
+/* Header : bascule en menu hamburger avant que ça devienne étroit */
+@media (max-width: 860px) {
   .site-header {
     position: static;
     flex-wrap: wrap;
@@ -865,31 +873,51 @@ form input:focus, select:focus {
 
   .logo { font-size: 1.2rem; }
 
-  .nav-links { display: none; }
+  .menu-toggle {
+    display: inline-flex;
+    margin-left: auto;
+  }
 
   .search-bar {
-    order: 10;
     flex: 1 1 100%;
     max-width: none;
     margin: 2px 0 0;
   }
 
-  .header-actions {
+  .header-menu {
+    flex: 1 1 100%;
     margin-left: 0;
+    display: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+
+  .header-menu.open { display: flex; }
+
+  .nav-links { flex-direction: column; gap: 2px; }
+
+  .nav-link { padding: 10px 12px; }
+
+  .header-actions {
+    flex-direction: column;
+    align-items: stretch;
     gap: 8px;
-    min-width: 0;
-    flex-shrink: 1;
   }
 
-  .btn { min-width: 0; }
-
-  #btn-account, #btn-login {
-    max-width: 140px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .header-actions .btn,
+  #account-area .btn {
+    width: 100%;
+    justify-content: center;
   }
 
+  #btn-account, #btn-login { max-width: none; }
+}
+
+/* Mobile */
+@media (max-width: 720px) {
   .icon-btn { width: 36px; height: 36px; }
 
   .hero { padding: 28px 20px; margin: 12px 12px 0; border-radius: 14px; }

@@ -66,6 +66,30 @@ document.getElementById('search-form').addEventListener('submit', (e) => {
 onStateChange(() => renderHeader())
 
 /* ------------------------------------------------------------------ */
+/* Menu hamburger (mobile)                                            */
+/* ------------------------------------------------------------------ */
+
+const menuToggle = document.getElementById('btn-menu-toggle')
+const headerMenu = document.getElementById('header-menu')
+
+function closeHeaderMenu() {
+  headerMenu.classList.remove('open')
+  menuToggle.setAttribute('aria-expanded', 'false')
+}
+
+menuToggle.addEventListener('click', () => {
+  const willOpen = !headerMenu.classList.contains('open')
+  headerMenu.classList.toggle('open', willOpen)
+  menuToggle.setAttribute('aria-expanded', String(willOpen))
+})
+
+// Ferme le menu dès qu'on clique un lien/bouton à l'intérieur, ou qu'on navigue
+headerMenu.addEventListener('click', (e) => {
+  if (e.target.closest('a, button')) closeHeaderMenu()
+})
+window.addEventListener('hashchange', closeHeaderMenu)
+
+/* ------------------------------------------------------------------ */
 /* Router                                                             */
 /* ------------------------------------------------------------------ */
 
