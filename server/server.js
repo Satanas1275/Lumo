@@ -11,6 +11,7 @@ import {
   getTitle,
   getSeasonEpisodes,
   getWatchMeta,
+  searchTMDB,
 } from './lib/tmdb.js'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
@@ -55,6 +56,12 @@ app.put('/api/me/settings', requireAuth, wrap(async (req, res) => {
 app.get('/api/discover', wrap(async (req, res) => {
   const region = String(req.query.region || 'FR').toUpperCase().slice(0, 2)
   res.json(await getDiscover(region))
+}))
+
+app.get('/api/search', wrap(async (req, res) => {
+  const region = String(req.query.region || 'FR').toUpperCase().slice(0, 2)
+  const q = String(req.query.q || '').trim()
+  res.json(await searchTMDB(q, region))
 }))
 
 app.get('/api/title/:type/:id', wrap(async (req, res) => {

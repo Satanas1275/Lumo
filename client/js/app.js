@@ -54,6 +54,15 @@ function renderHeader() {
 
 document.getElementById('btn-settings').addEventListener('click', openSettings)
 
+const searchInput = document.getElementById('search-input')
+document.getElementById('search-form').addEventListener('submit', (e) => {
+  e.preventDefault()
+  const q = searchInput.value.trim()
+  if (!q) return
+  searchInput.blur()
+  location.hash = '#/search/' + encodeURIComponent(q)
+})
+
 onStateChange(() => renderHeader())
 
 /* ------------------------------------------------------------------ */
@@ -63,6 +72,9 @@ onStateChange(() => renderHeader())
 function parseHash() {
   const h = location.hash.replace(/^#/, '') || '/'
   const parts = h.split('/').filter(Boolean)
+  if (parts[0] === 'search') {
+    return { page: 'search', query: decodeURIComponent(parts[1] || '') }
+  }
   if (parts[0] === 'title' && parts[1] && parts[2]) {
     return { page: 'title', type: parts[1], id: parts[2] }
   }
@@ -73,10 +85,11 @@ function parseHash() {
 }
 
 export function route() {
-  const { page, type, id } = parseHash()
+  const { page, type, id, query } = parseHash()
   window.scrollTo({ top: 0 })
   if (page === 'title') renderTitle(type, id)
   else if (page === 'watch') renderWatch(type, id)
+  else if (page === 'search') renderSearch(query)
   else renderHome()
 }
 
@@ -164,6 +177,43 @@ async function renderHome() {
 }
 
 /* ------------------------------------------------------------------ */
+/* Page de recherche                                                   */
+/* ------------------------------------------------------------------ */
+
+async function renderSearch(query) {
+  const q = String(query || '').trim()
+  searchInput.value = q
+  if (!q) {
+    app.innerHTML = `
+      <div class="search-empty">
+        <h2>Recherche</h2>
+        <p class="muted">Tapez le titre d'un film, d'une série ou d'un anime dans la barre en haut pour lancer une recherche.</p>
+      </div>`
+    return
+  }
+  app.innerHTML = `<div class="spinner"></div>`
+  try {
+    const data = await api.search(q, state.settings.region)
+    const total = data.movies.length + data.series.length + data.anime.length
+    app.innerHTML = `
+      <div class="section search-results">
+        <h2 class="section-title">Résultats pour « ${escapeHtml(q)} » <span class="result-count">${total}</span></h2>
+        ${total === 0 ? `<p class="muted">Aucun résultat trouvé. Essayez un autre titre.</p>` : ''}
+        ${renderSection('Films', data.movies)}
+        ${renderSection('Séries', data.series)}
+        ${renderSection('Animes', data.anime)}
+      </div>`
+  } catch (err) {
+    app.innerHTML = `
+      <div class="error-state">
+        <h2>Recherche impossible</h2>
+        <p>${escapeHtml(err.message)}</p>
+        <a class="btn btn-primary" href="#/">Retour à l'accueil</a>
+      </div>`
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Page détail                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -226,7 +276,7 @@ async function renderTitle(type, id) {
                         <div class="season" data-season="${s.seasonNumber}">
                           <button class="season-btn">
                             <span class="season-chevron">▸</span>
-                            <span>${escapeHtml(s.name)}</span>
+                            <span class="season-name">${escapeHtml(s.name)}</span>
                             <span class="season-count">${s.episodeCount} ép.</span>
                           </button>
                           <div class="season-episodes"></div>

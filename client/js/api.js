@@ -18,6 +18,9 @@ async function request(path, opts = {}) {
 export const api = {
   discover: (region) => request(`/api/discover?region=${encodeURIComponent(region)}`),
 
+  search: (query, region) =>
+    request(`/api/search?q=${encodeURIComponent(query)}&region=${encodeURIComponent(region)}`),
+
   title: (type, id, region) =>
     request(`/api/title/${type}/${id}?region=${encodeURIComponent(region)}`),
 

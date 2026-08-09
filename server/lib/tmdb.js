@@ -210,6 +210,43 @@ export async function getSeasonEpisodes(id, seasonNumber) {
   return episodes
 }
 
+const SEARCH_TTL = 60 * 60 * 1000
+
+function splitByType(results) {
+  const buckets = { movies: [], series: [], anime: [] }
+  const seen = new Set()
+  for (const r of results || []) {
+    if (!r || !['movie', 'tv'].includes(r.media_type)) continue
+    if (seen.has(`${r.media_type}:${r.id}`)) continue
+    seen.add(`${r.media_type}:${r.id}`)
+    const isAnime =
+      (r.genre_ids || []).includes(16) && (r.original_language || '') === 'ja'
+    const target = r.media_type === 'movie' ? (isAnime ? 'anime' : 'movies') : isAnime ? 'anime' : 'series'
+    buckets[target].push(normalizeItem(r.media_type, r))
+  }
+  return buckets
+}
+
+export async function searchTMDB(query, region = 'FR') {
+  const q = String(query || '').trim()
+  if (!q) return { query: '', movies: [], series: [], anime: [] }
+  const cacheKey = `search:${q.toLowerCase()}:${region}`
+  const hit = cacheGet(cacheKey)
+  if (hit) return hit
+
+  const multi = await tmdb('/search/multi', { query: q, include_adult: false, page: 1 })
+  const buckets = splitByType(multi.results)
+
+  buckets.movies = buckets.movies.slice(0, 15)
+  buckets.series = buckets.series.slice(0, 15)
+  buckets.anime = buckets.anime.slice(0, 8)
+  await attachProviders([...buckets.movies, ...buckets.series, ...buckets.anime], region)
+
+  const out = { query: q, ...buckets }
+  cacheSet(cacheKey, out, SEARCH_TTL)
+  return out
+}
+
 export function getWatchMeta(type, id) {
   return {
     type,
