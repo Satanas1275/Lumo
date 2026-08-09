@@ -856,9 +856,11 @@ form input:focus, select:focus {
 @media (max-width: 720px) {
   /* Header : logo + actions sur la 1re ligne, recherche sur la 2e */
   .site-header {
+    position: static;
     flex-wrap: wrap;
     padding: 10px 12px;
     gap: 8px 12px;
+    min-width: 0;
   }
 
   .logo { font-size: 1.2rem; }
@@ -872,7 +874,21 @@ form input:focus, select:focus {
     margin: 2px 0 0;
   }
 
-  .header-actions { margin-left: 0; gap: 8px; }
+  .header-actions {
+    margin-left: 0;
+    gap: 8px;
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .btn { min-width: 0; }
+
+  #btn-account, #btn-login {
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
   .icon-btn { width: 36px; height: 36px; }
 
