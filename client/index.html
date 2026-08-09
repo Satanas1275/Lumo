@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b0d12" />
+  <title>Lumo — Films, séries &amp; animes</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23e50914'/%3E%3Cpath d='M10 8l12 8-12 8z' fill='%23fff'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <header class="site-header">
+    <a class="logo" href="#/">
+      <span class="logo-play">▶</span> Lumo
+    </a>
+    <nav class="nav-links">
+      <a href="#/" class="nav-link">Accueil</a>
+    </nav>
+    <div class="header-actions">
+      <button id="btn-settings" class="icon-btn" title="Paramètres" aria-label="Paramètres">⚙</button>
+      <span id="account-area"></span>
+    </div>
+  </header>
+
+  <main id="app" class="app"></main>
+
+  <div id="modal-root"></div>
+
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>
