@@ -10,9 +10,14 @@ import {
   getDiscover,
   getTitle,
   getSeasonEpisodes,
-  getWatchMeta,
   searchTMDB,
 } from './lib/tmdb.js'
+import {
+  AGGREGATE_URL,
+  DOWNLOAD_DIR,
+  getStatus,
+  startDownload,
+} from './lib/downloader.js'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT_DIR = join(ROOT, 'client')
@@ -76,13 +81,33 @@ app.get('/api/title/tv/:id/season/:season', wrap(async (req, res) => {
   res.json({ episodes: await getSeasonEpisodes(Number(id), Number(season)) })
 }))
 
-app.get('/api/watch/:type/:id', wrap(async (req, res) => {
+app.post('/api/dl/:type/:id', wrap(async (req, res) => {
   const { type, id } = req.params
-  res.json(getWatchMeta(type, Number(id)))
+  const { season, episode } = req.query
+  res.json(await startDownload(type, String(id), Number(season) || 1, Number(episode) || 1))
+}))
+
+app.get('/api/dl/:type/:id', wrap(async (req, res) => {
+  const { type, id } = req.params
+  const { season, episode } = req.query
+  const key = type === 'tv'
+    ? `tv/${id}/s${Number(season) || 1}e${Number(episode) || 1}`
+    : `movie/${id}`
+  res.json(await getStatus(key))
 }))
 
 // --- Frontend statique ----------------------------------------------------
 app.use(express.static(CLIENT_DIR))
+
+// Dossier de téléchargements : servi en local pour la lecture
+app.use('/dl', express.static(DOWNLOAD_DIR, {
+  setHeaders(res, filePath) {
+    if (filePath.endsWith('.m3u8')) res.setHeader('Content-Type', 'application/vnd.apple.mpegurl')
+    if (filePath.endsWith('.ts')) res.setHeader('Content-Type', 'video/mp2t')
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+  },
+}))
+
 app.get(/^\/(?!api\/).*/, (req, res) => {
   res.sendFile(join(CLIENT_DIR, 'index.html'))
 })

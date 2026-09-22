@@ -26,7 +26,23 @@ export const api = {
 
   season: (id, season) => request(`/api/title/tv/${id}/season/${season}`),
 
-  watch: (type, id) => request(`/api/watch/${type}/${id}`),
+  dlStatus: (type, id, opts = {}) => {
+    const q = new URLSearchParams()
+    if (type === 'tv') {
+      q.set('season', opts.season || 1)
+      q.set('episode', opts.episode || 1)
+    }
+    return request(`/api/dl/${type}/${id}?${q}`)
+  },
+
+  dlStart: (type, id, opts = {}) => {
+    const q = new URLSearchParams()
+    if (type === 'tv') {
+      q.set('season', opts.season || 1)
+      q.set('episode', opts.episode || 1)
+    }
+    return request(`/api/dl/${type}/${id}?${q}`, { method: 'POST', body: '{}' })
+  },
 
   register: (username, password) =>
     request('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) }),

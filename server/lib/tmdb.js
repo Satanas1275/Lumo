@@ -246,12 +246,3 @@ export async function searchTMDB(query, region = 'FR') {
   cacheSet(cacheKey, out, SEARCH_TTL)
   return out
 }
-
-export function getWatchMeta(type, id) {
-  return {
-    type,
-    id,
-    available: false,
-    message: "Le lecteur n'est pas encore disponible sur Lumo. Revenez bientôt !",
-  }
-}

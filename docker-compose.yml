@@ -13,6 +13,9 @@ services:
     volumes:
       # Persiste les comptes et la clé JWT générée
       - lumo_data:/app/server/data
+      # Dossier de téléchargements des vidéos (lecture locale)
+      - lumo_downloads:/app/downloads
 
 volumes:
   lumo_data:
+  lumo_downloads:

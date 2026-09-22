@@ -25,6 +25,12 @@ function icon(name) {
 
 const ICONS = {
   play: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+  pause: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>',
+  volume: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>',
+  muted: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>',
+  fullscreen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>',
+  exitFullscreen: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>',
+  download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
   star: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 17.3l-6.2 3.7 1.6-7-5.4-4.7 7.1-.6L12 2l2.9 6.7 7.1.6-5.4 4.7 1.6 7z"/></svg>',
   settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   user: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
@@ -103,16 +109,21 @@ function parseHash() {
     return { page: 'title', type: parts[1], id: parts[2] }
   }
   if (parts[0] === 'watch' && parts[1] && parts[2]) {
-    return { page: 'watch', type: parts[1], id: parts[2] }
+    const r = { page: 'watch', type: parts[1], id: parts[2] }
+    if (parts[1] === 'tv') {
+      r.season = Number(parts[3]) || 1
+      r.episode = Number(parts[4]) || 1
+    }
+    return r
   }
   return { page: 'home' }
 }
 
 export function route() {
-  const { page, type, id, query } = parseHash()
+  const { page, type, id, query, season, episode } = parseHash()
   window.scrollTo({ top: 0 })
   if (page === 'title') renderTitle(type, id)
-  else if (page === 'watch') renderWatch(type, id)
+  else if (page === 'watch') renderWatch(type, id, { season, episode })
   else if (page === 'search') renderSearch(query)
   else renderHome()
 }
@@ -241,9 +252,9 @@ async function renderSearch(query) {
 /* Page détail                                                        */
 /* ------------------------------------------------------------------ */
 
-function episodeRow(e) {
+function episodeRow(e, tid, season) {
   return `
-    <div class="episode">
+    <a class="episode" href="#/watch/tv/${tid}/${season}/${e.number}">
       <div class="episode-img">
         ${e.still ? `<img src="${e.still}" alt="" loading="lazy"/>` : ''}
       </div>
@@ -256,7 +267,7 @@ function episodeRow(e) {
         ${e.airDate ? `<span class="episode-date">${escapeHtml(e.airDate)}</span>` : ''}
         ${e.overview ? `<p class="episode-overview">${escapeHtml(e.overview)}</p>` : ''}
       </div>
-    </div>`
+    </a>`
 }
 
 async function renderTitle(type, id) {
@@ -359,7 +370,7 @@ async function renderTitle(type, id) {
         try {
           const { episodes } = await api.season(id, n)
           box.innerHTML = episodes.length
-            ? episodes.map(episodeRow).join('')
+            ? episodes.map((e) => episodeRow(e, id, n)).join('')
             : `<p class="muted">Aucun épisode.</p>`
         } catch (err) {
           box.innerHTML = `<p class="muted">${escapeHtml(err.message)}</p>`
@@ -377,51 +388,206 @@ async function renderTitle(type, id) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Page regarder (placeholder)                                        */
+/* Page regarder : téléchargement local + player                       */
 /* ------------------------------------------------------------------ */
 
-async function renderWatch(type, id) {
+let watchToken = 0
+
+function fmtTime(sec) {
+  if (!Number.isFinite(sec)) return '0:00'
+  const s = Math.max(0, Math.floor(sec))
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const ss = s % 60
+  return `${h ? `${h}:${String(m).padStart(2, '0')}` : m}:${String(ss).padStart(2, '0')}`
+}
+
+function fmtBytes(n) {
+  if (!n) return '0'
+  const u = ['o', 'Ko', 'Mo', 'Go', 'To']
+  const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)))
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`
+}
+
+function bindPlayer(video, src) {
+  let hls = null
+  const teardown = () => {
+    if (hls) { hls.destroy(); hls = null }
+  }
+
+  if (window.Hls && Hls.isSupported()) {
+    hls = new Hls({ enableWorker: true, maxBufferLength: 90 })
+    hls.loadSource(src)
+    hls.attachMedia(video)
+    hls.on(Hls.Events.ERROR, (_e, data) => {
+      if (!data.fatal) return
+      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad()
+      else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError()
+      else {
+        teardown()
+        showError('Erreur de lecture de la vidéo locale.')
+      }
+    })
+  } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+    video.src = src
+  } else {
+    showError('Votre navigateur ne peut pas lire HLS.')
+    return teardown
+  }
+
+  const screen = document.getElementById('player-screen')
+  const controls = document.getElementById('player-controls')
+  const btnPlay = document.getElementById('ctl-play')
+  const btnMute = document.getElementById('ctl-mute')
+  const btnFs = document.getElementById('ctl-fullscreen')
+  const bar = document.getElementById('player-bar')
+  const prog = document.getElementById('player-progress')
+  const timeEl = document.getElementById('player-time')
+
+  const setPlayIcon = () => { btnPlay.innerHTML = video.paused ? ICONS.play : ICONS.pause }
+  const setMuteIcon = () => {
+    btnMute.innerHTML = video.muted ? ICONS.muted : ICONS.volume
+    btnMute.classList.toggle('active', video.muted)
+  }
+
+  btnPlay.addEventListener('click', () => {
+    if (video.paused) video.play().catch(() => {})
+    else video.pause()
+  })
+  btnMute.addEventListener('click', () => { video.muted = !video.muted })
+  btnFs.addEventListener('click', () => {
+    if (!document.fullscreenElement) screen.requestFullscreen?.().catch(() => {})
+    else document.exitFullscreen?.()
+  })
+
+  bar.addEventListener('click', (e) => {
+    if (!video.duration) return
+    const rect = bar.getBoundingClientRect()
+    const r = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width))
+    video.currentTime = r * video.duration
+  })
+
+  video.addEventListener('play', setPlayIcon)
+  video.addEventListener('pause', setPlayIcon)
+  video.addEventListener('volumechange', setMuteIcon)
+
+  const updateTime = () => {
+    const d = video.duration || 0
+    const c = video.currentTime || 0
+    prog.style.width = `${d ? (c / d) * 100 : 0}%`
+    timeEl.textContent = `${fmtTime(c)} / ${fmtTime(d)}`
+  }
+  video.addEventListener('timeupdate', updateTime)
+  video.addEventListener('loadedmetadata', () => { controls.hidden = false; updateTime() })
+  video.addEventListener('durationchange', updateTime)
+
+  setPlayIcon()
+  setMuteIcon()
+  video.play().then(() => {}).catch(() => {})
+
+  return teardown
+}
+
+async function renderWatch(type, id, opts = {}) {
+  const token = ++watchToken
   app.innerHTML = `<div class="spinner"></div>`
-  let title = ''
+
+  let title = 'Lecture'
   try {
     const t = await api.title(type, id, state.settings.region)
     title = t.title
   } catch {}
-  try {
-    const meta = await api.watch(type, id)
-    app.innerHTML = `
-      <div class="watch-page">
-        <div class="player">
-          <div class="player-topbar">
-            <a class="btn btn-ghost" href="#/title/${type}/${id}">${ICONS.back} Retour</a>
-            <h2>${escapeHtml(title || 'Lecture')}</h2>
-          </div>
-          <div class="player-screen">
-            <div class="player-placeholder">
-              <div class="player-icon">${ICONS.play}</div>
-              <h3>${escapeHtml(meta.message)}</h3>
-              <p class="muted">La page de lecture arrive bientôt sur Lumo.</p>
+
+  const isTv = type === 'tv'
+  const label = isTv ? `S${opts.season}E${opts.episode}` : null
+
+  app.innerHTML = `
+    <div class="watch-page">
+      <div class="player">
+        <div class="player-topbar">
+          <a class="btn btn-ghost" href="#/title/${type}/${id}">${ICONS.back} Retour</a>
+          <h2>${escapeHtml(title)}${label ? ` <span class="player-ep">${escapeHtml(label)}</span>` : ''}</h2>
+        </div>
+        <div class="player-screen" id="player-screen">
+          <video id="lumo-video" class="lumo-video" preload="auto" playsinline webkit-playsinline></video>
+          <div class="dl-overlay" id="dl-overlay">
+            <div class="dl-card">
+              <div class="dl-icon">${ICONS.download}</div>
+              <h3 id="dl-title">Téléchargement en cours</h3>
+              <div class="dl-bar"><span class="dl-progress" id="dl-progress"></span></div>
+              <p class="dl-stats muted" id="dl-stats">Démarrage…</p>
             </div>
           </div>
-          <div class="player-controls">
-            <span class="ctrl disabled" title="Lecture">Lecture</span>
-            <span class="ctrl disabled" title="Pause">Pause</span>
-            <span class="player-bar"><span class="player-progress" style="width:0%"></span></span>
-            <span class="ctrl disabled" title="Durée">Durée</span>
-            <span class="ctrl disabled" title="Volume">Volume</span>
-            <span class="ctrl disabled" title="Plein écran">Plein écran</span>
-          </div>
         </div>
-        <p class="muted center">${ICONS.eye} Ce lecteur est désactivé pour le moment.</p>
-      </div>`
-  } catch (err) {
-    app.innerHTML = `
-      <div class="error-state">
-        <h2>Lecture indisponible</h2>
-        <p>${escapeHtml(err.message)}</p>
-        <a class="btn btn-primary" href="#/title/${type}/${id}">Retour à la fiche</a>
-      </div>`
+        <div class="player-controls" id="player-controls" hidden>
+          <button class="ctrl" id="ctl-play" title="Lecture / Pause">${ICONS.play}</button>
+          <button class="ctrl" id="ctl-mute" title="Muet">${ICONS.volume}</button>
+          <span class="player-bar" id="player-bar"><span class="player-progress" id="player-progress"></span></span>
+          <span class="player-time" id="player-time">0:00 / 0:00</span>
+          <button class="ctrl" id="ctl-fullscreen" title="Plein écran">${ICONS.fullscreen}</button>
+        </div>
+      </div>
+      <p class="muted center watch-hint">${ICONS.download} Les vidéos sont téléchargées en local, puis lues depuis le disque pour une lecture fluide et hors-ligne.</p>
+    </div>`
+
+  const overlay = document.getElementById('dl-overlay')
+  const progressEl = document.getElementById('dl-progress')
+  const statsEl = document.getElementById('dl-stats')
+
+  const showStatus = (st) => {
+    if (st.status === 'ready') {
+      overlay.hidden = true
+      const video = document.getElementById('lumo-video')
+      const teardown = bindPlayer(video, st.playUrl)
+      window.addEventListener('hashchange', teardown, { once: true })
+    } else if (st.status === 'error') {
+      overlay.innerHTML = `
+        <div class="dl-card dl-error-card">
+          <div class="dl-icon err">${ICONS.play}</div>
+          <h3>Téléchargement impossible</h3>
+          <p class="muted">${escapeHtml(st.error || 'Erreur inconnue.')}</p>
+          <button class="btn btn-primary" id="dl-retry">Réessayer</button>
+        </div>`
+      document.getElementById('dl-retry').addEventListener('click', () => route())
+    } else if (st.status === 'downloading') {
+      const pct = st.ratio > 0 ? Math.round(st.ratio * 100) : null
+      progressEl.style.width = pct != null ? `${pct}%` : '25%'
+      progressEl.classList.toggle('indeterminate', pct == null)
+      statsEl.textContent = st.totalBytes
+        ? `${pct}% — ${fmtBytes(st.downloadedBytes)} / ${fmtBytes(st.totalBytes)}`
+        : st.segmentsTotal
+          ? `${fmtBytes(st.downloadedBytes)} · ${st.segments}/${st.segmentsTotal} segments`
+          : `${fmtBytes(st.downloadedBytes)} téléchargés`
+    }
   }
+
+  const start = async () => {
+    let st
+    try {
+      st = await api.dlStart(type, id, opts)
+    } catch (err) {
+      showStatus({ status: 'error', error: err.message })
+      return
+    }
+    if (token !== watchToken) return
+    showStatus(st)
+    if (st.status === 'downloading') schedulePoll()
+  }
+
+  const schedulePoll = () => {
+    setTimeout(async () => {
+      if (token !== watchToken) return
+      let st
+      try {
+        st = await api.dlStatus(type, id, opts)
+      } catch {}
+      if (token !== watchToken || !st) return
+      showStatus(st)
+      if (st.status === 'downloading') schedulePoll()
+    }, 900)
+  }
+
+  start()
 }
 
 /* ------------------------------------------------------------------ */
