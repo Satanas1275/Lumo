@@ -1,4 +1,5 @@
 import { createDecipheriv } from 'crypto'
+import { spawn } from 'child_process'
 import { mkdir, readdir, rm, stat, writeFile } from 'fs/promises'
 import { createWriteStream, readdirSync } from 'fs'
 import { dirname, join } from 'path'
@@ -134,6 +135,80 @@ function collectCandidates(meta) {
     return s
   }
 
+  return dedup.sort((a, b) => score(b) - score(a))
+}
+
+// URLs "page de lecteur" (embed) présentes dans la fiche, à scraper à la
+// recherche d'une vraie source vidéo (m3u8/mp4) si aucune URL directe n'existe.
+function collectEmbedPages(meta) {
+  const seen = new Set()
+  const pages = []
+
+  function walk(v) {
+    if (typeof v === 'string' && /^https?:\/\//.test(v)) {
+      const clean = v.replace(/#.*$/, '')
+      if (/\.(m3u8|mp4|m4v|webm|mov)(\?|$)/i.test(clean)) return
+      if (/\.(jpe?g|png|webp|gif|svg|css|js|json)(\?|$)/i.test(clean)) return
+      if (seen.has(clean)) return
+      seen.add(clean)
+      pages.push(clean)
+      return
+    }
+    if (Array.isArray(v)) return v.forEach(walk)
+    if (v && typeof v === 'object') return Object.values(v).forEach(walk)
+  }
+
+  walk(meta)
+  return pages
+}
+
+// Scrape les pages embed : on cherche des URLs de médias (m3u8/mp4...) dans
+// le HTML (balises source, variable file, ...). Parallélisé avec un plafond
+// raisonnable : certaines sources ne se trouvent qu'à la fin de la liste.
+async function scrapeMediaFromEmbeds(pages) {
+  const re = /(?:https?:)?\/\/[^"'\s<>]+?\.(m3u8|mp4|m4v|webm|mov)(?:[?#][^"'\s<>]*)?/gi
+  const target = pages.slice(0, 30)
+  const found = []
+
+  async function scrapeOne(page) {
+    try {
+      const res = await fetch(page, {
+        headers: reqHeaders(new URL(page).origin),
+        redirect: 'follow',
+      })
+      if (!res.ok) return
+      const text = await res.text()
+      for (const m of text.matchAll(re)) {
+        const clean = m[0].replace(/#.*$/, '')
+        const full = resolveUrl(page, clean)
+        if (/^https?:\/\//.test(full)) found.push(full)
+      }
+    } catch {
+      // page suivante
+    }
+  }
+
+  const pool = 5
+  for (let i = 0; i < target.length; i += pool) {
+    await Promise.all(target.slice(i, i + pool).map(scrapeOne))
+  }
+
+  const seen = new Set()
+  const dedup = []
+  for (const url of found) {
+    if (seen.has(url)) continue
+    seen.add(url)
+    dedup.push(url)
+  }
+  const score = (u) => {
+    let s = 0
+    if (/\.m3u8(?:\?|$)/i.test(u)) s += 10
+    if (/\/(master|index)(\.m3u8)?(\?|$)/i.test(u)) s += 20
+    if (/1080|2160|4k/i.test(u)) s += 5
+    if (/720/i.test(u)) s += 3
+    if (/mp4|m4v|webm|mov/i.test(u)) s += 2
+    return s
+  }
   return dedup.sort((a, b) => score(b) - score(a))
 }
 
@@ -397,6 +472,105 @@ async function downloadDirect(url, destDir, job) {
 }
 
 // ---------------------------------------------------------------------------
+// Fallback yt-dlp : ultime recours quand aucune source (directe ou scrapée)
+// n'a pu être trouvée. yt-dlp sait résoudre certains hosts/players via ses
+// extracteurs. À garder uniquement en fallback.
+// ---------------------------------------------------------------------------
+
+function parseHumanSize(text) {
+  const m = /([\d.]+)\s*([KMGT]i?B)/i.exec(text || '')
+  if (!m) return 0
+  const mult = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, KiB: 1024, MiB: 1024 ** 2, GiB: 1024 ** 3, TiB: 1024 ** 4 }
+  return Math.round(Number(m[1]) * (mult[m[2].toUpperCase()] || 1))
+}
+
+// Lance yt-dlp sur une page et rend le nom du fichier produit (ex: video.mp4).
+// Suit la progression via la sortie `--newline` de yt-dlp.
+export async function ytdlpDownload(page, destDir, job) {
+  const bin = process.env.YTDLP_BIN || 'yt-dlp'
+  const target = join(destDir, 'video.%(ext)s')
+  const timeoutMs = Number(process.env.YTDLP_TIMEOUT || 0) || 180000
+
+  return new Promise((resolve, reject) => {
+    let child
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      reject(new Error('yt-dlp a pris trop de temps'))
+    }, timeoutMs)
+
+    try {
+      child = spawn(
+        bin,
+        ['--newline', '--no-playlist', '--no-warnings', '-f', 'best[ext=mp4]/best', '-o', target, page],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      )
+    } catch (err) {
+      clearTimeout(timer)
+      reject(new Error(`Impossible de lancer yt-dlp (${bin}) : ${err.message}`))
+      return
+    }
+
+    child.on('error', (err) => {
+      clearTimeout(timer)
+      reject(new Error(`yt-dlp introuvable (${bin}). Installez-le pour activer ce fallback.`))
+    })
+
+    child.stdout.on('data', (chunk) => {
+      const m = /(\d+(?:\.\d+)?)%\s+of\s+([\d.]+)\s*[KMGT]i?B/i.exec(chunk.toString())
+      if (m) {
+        const ratio = Math.max(0, Math.min(1, Number(m[1]) / 100))
+        const total = parseHumanSize(m[0])
+        if (total) progressJob(job, { totalBytes: total, downloadedBytes: Math.round(total * ratio), ratio })
+      }
+    })
+
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) {
+        reject(new Error(`yt-dlp a échoué sur ${page} (code ${code})`))
+        return
+      }
+      const file = readdirSync(destDir).find((f) => /^video\./.test(f))
+      if (!file) {
+        reject(new Error("yt-dlp n'a produit aucun fichier"))
+        return
+      }
+      resolve(file)
+    })
+  })
+}
+
+async function tryYtdlpFallback(pages, key, job) {
+  if ((process.env.YTDLP_FALLBACK || 'true') === 'false') {
+    throw new Error("Aucune source vidéo trouvée pour ce titre sur l'agrégateur.")
+  }
+  const destDir = folderFor(key)
+  let lastErr = null
+  for (const page of pages.slice(0, 5)) {
+    try {
+      const file = await ytdlpDownload(page, destDir, job)
+      const fstat = await stat(join(destDir, file))
+      progressJob(job, {
+        status: 'ready',
+        downloadedBytes: fstat.size,
+        totalBytes: fstat.size,
+        ratio: 1,
+        quality: 'fallback',
+        playUrl: `/dl/${key}/${file}`,
+      })
+      return
+    } catch (err) {
+      lastErr = err
+      await rm(destDir, { recursive: true, force: true }).catch(() => {})
+      await mkdir(destDir, { recursive: true })
+    }
+  }
+  throw new Error(
+    `Aucune source vidéo trouvée (ni directe, ni scrapée, ni via yt-dlp).${lastErr ? ` Dernier essai : ${lastErr.message}` : ''}`,
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -444,9 +618,16 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
     const meta = await fetchAggregate(type, id, season, episode)
     job.title = meta?.title || meta?.tmdb_details?.title || `${type} ${id}`
 
-    const candidates = collectCandidates(meta)
+    let candidates = collectCandidates(meta)
+    const pages = collectEmbedPages(meta)
     if (!candidates.length) {
-      throw new Error("Aucune source vidéo trouvée pour ce titre sur l'agrégateur.")
+      // Pas d'URL directe : on scrappe les pages embed pour en extraire une.
+      candidates = await scrapeMediaFromEmbeds(pages)
+    }
+    if (!candidates.length) {
+      // Ultime recours : yt-dlp sur les pages embed.
+      await tryYtdlpFallback(pages, key, job)
+      return
     }
 
     for (const url of candidates) {
