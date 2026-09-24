@@ -21,7 +21,7 @@ import {
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT_DIR = join(ROOT, 'client')
-const PORT = Number(process.env.PORT || 3000)
+const PORT = Number(process.env.PORT || 3002)
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || ''
 
 const app = express()

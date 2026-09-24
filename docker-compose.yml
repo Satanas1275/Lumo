@@ -4,12 +4,12 @@ services:
     container_name: lumo
     restart: unless-stopped
     ports:
-      # 7781 (public) -> 3000 (interne)
-      - "7781:3000"
+      # 7781 (public) -> 3002 (interne)
+      - "7781:3002"
     env_file:
       - ./server/.env
     environment:
-      - PORT=3000
+      - PORT=3002
     volumes:
       # Persiste les comptes et la clé JWT générée
       - lumo_data:/app/server/data
