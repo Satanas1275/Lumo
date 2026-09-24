@@ -49,6 +49,20 @@ function renderHeader() {
        <button class="icon-btn" id="btn-logout" title="Se déconnecter">${ICONS.logout}</button>`
     : `<button class="btn btn-primary" id="btn-login">Se connecter</button>`
 
+  const nav = document.querySelector('.nav-links')
+  const adminLink = nav ? nav.querySelector('.nav-link[href="#/admin"]') : null
+  if (state.user?.role === 'admin') {
+    if (nav && !adminLink) {
+      const a = document.createElement('a')
+      a.className = 'nav-link'
+      a.href = '#/admin'
+      a.textContent = 'Admin'
+      nav.appendChild(a)
+    }
+  } else if (adminLink) {
+    adminLink.remove()
+  }
+
   document.getElementById('btn-login')?.addEventListener('click', openAuth)
   document.getElementById('btn-account')?.addEventListener('click', openAuth)
   document.getElementById('btn-logout')?.addEventListener('click', () => {
@@ -116,6 +130,7 @@ function parseHash() {
     }
     return r
   }
+  if (parts[0] === 'admin') return { page: 'admin' }
   return { page: 'home' }
 }
 
@@ -125,6 +140,7 @@ export function route() {
   if (page === 'title') renderTitle(type, id)
   else if (page === 'watch') renderWatch(type, id, { season, episode })
   else if (page === 'search') renderSearch(query)
+  else if (page === 'admin') renderAdmin()
   else renderHome()
 }
 
@@ -490,6 +506,23 @@ function bindPlayer(video, src) {
 
 async function renderWatch(type, id, opts = {}) {
   const token = ++watchToken
+  if (!state.user) {
+    const cfg = await api.config().catch(() => ({ requireAuthToWatch: true }))
+    if (token !== watchToken) return
+    if (cfg.requireAuthToWatch) {
+      app.innerHTML = `
+        <div class="error-state watch-locked">
+          <div class="player-icon">${ICONS.play}</div>
+          <h2>Connexion requise pour regarder</h2>
+          <p class="muted">Connectez-vous (ou créez un compte) pour lancer des téléchargements et accéder à la lecture.</p>
+          <button class="btn btn-primary" id="watch-login">Se connecter</button>
+          <p class="error-hint"><a class="nav-link" href="#/title/${type}/${id}">← Retour à la fiche</a></p>
+        </div>`
+      document.getElementById('watch-login').addEventListener('click', openAuth)
+      return
+    }
+  }
+
   app.innerHTML = `<div class="spinner"></div>`
 
   let title = 'Lecture'
@@ -591,6 +624,92 @@ async function renderWatch(type, id, opts = {}) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Page admin : approbation des comptes                                */
+/* ------------------------------------------------------------------ */
+
+async function renderAdmin() {
+  if (state.user?.role !== 'admin') {
+    app.innerHTML = `
+      <div class="error-state">
+        <h2>Accès refusé</h2>
+        <p class="muted">Cette page est réservée aux administrateurs.</p>
+        <a class="btn btn-primary" href="#/">Retour à l'accueil</a>
+      </div>`
+    return
+  }
+
+  app.innerHTML = `<div class="spinner"></div>`
+  try {
+    const { users } = await api.adminUsers()
+    const pending = users.filter((u) => u.status === 'pending')
+    const rest = users.filter((u) => u.status !== 'pending')
+
+    const row = (u) => `
+      <div class="admin-row">
+        <div class="admin-ident">
+          <span class="admin-name">${escapeHtml(u.username)}</span>
+          ${u.role === 'admin' ? `<span class="chip chip-admin">admin</span>` : ''}
+          <span class="admin-created">membre depuis le ${new Date(u.createdAt).toLocaleDateString('fr-FR')}</span>
+        </div>
+        ${u.status === 'pending'
+          ? `<div class="admin-actions">
+               <button class="btn btn-ghost" data-approve="${u.id}">Approuver</button>
+               <button class="btn btn-danger" data-remove="${u.id}">Refuser</button>
+             </div>`
+          : u.role === 'admin'
+            ? `<span class="muted">${u.username === state.user.username ? 'vous' : 'administrateur'}</span>`
+            : `<div class="admin-actions">
+                 <button class="btn btn-danger" data-remove="${u.id}">Supprimer</button>
+               </div>`}
+      </div>`
+
+    app.innerHTML = `
+      <div class="admin-page">
+        <div class="section">
+          <h2 class="section-title">Administration</h2>
+          <p class="muted">Les comptes en attente doivent être approuvés avant de pouvoir se connecter.</p>
+
+          ${pending.length ? `
+            <h3 class="admin-sub">En attente (${pending.length})</h3>
+            <div class="admin-list">${pending.map(row).join('')}</div>` : ''}
+
+          <h3 class="admin-sub">Comptes (${rest.length})</h3>
+          <div class="admin-list">${rest.map(row).join('')}</div>
+        </div>
+      </div>`
+
+    app.querySelectorAll('[data-approve]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        try {
+          await api.adminApprove(btn.dataset.approve)
+          renderAdmin()
+        } catch (err) {
+          showError(err.message)
+        }
+      })
+    })
+    app.querySelectorAll('[data-remove]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Supprimer ce compte ?')) return
+        try {
+          await api.adminDelete(btn.dataset.remove)
+          renderAdmin()
+        } catch (err) {
+          showError(err.message)
+        }
+      })
+    })
+  } catch (err) {
+    app.innerHTML = `
+      <div class="error-state">
+        <h2>Administration indisponible</h2>
+        <p>${escapeHtml(err.message)}</p>
+        <a class="btn btn-primary" href="#/">Retour à l'accueil</a>
+      </div>`
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Modales : authentification                                          */
 /* ------------------------------------------------------------------ */
 
@@ -659,6 +778,11 @@ function openAuth() {
         mode === 'login'
           ? await api.login(username, password)
           : await api.register(username, password)
+      if (res.pending) {
+        errorEl.textContent = res.message || "Compte créé. En attente d'approbation par un administrateur."
+        setMode('login')
+        return
+      }
       setSession(res)
       close()
       renderHeader()

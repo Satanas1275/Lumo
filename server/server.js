@@ -3,8 +3,9 @@ import express from 'express'
 import cors from 'cors'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { register, login, signToken, toPublic, updateSettings } from './lib/users.js'
-import { requireAuth } from './lib/auth.js'
+import { register, login, signToken, toPublic, updateSettings, approveUser, deleteUser, listUsers, approvalRequired } from './lib/users.js'
+import { requireAuth, requireAdmin } from './lib/auth.js'
+import { rateLimit } from './lib/ratelimit.js'
 import {
   ApiError,
   getDiscover,
@@ -23,6 +24,9 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const CLIENT_DIR = join(ROOT, 'client')
 const PORT = Number(process.env.PORT || 3002)
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || ''
+const REQUIRE_AUTH_TO_WATCH = process.env.REQUIRE_AUTH_TO_WATCH !== 'false'
+
+const authGate = REQUIRE_AUTH_TO_WATCH ? requireAuth : (req, res, next) => next()
 
 const app = express()
 app.use(cors({ origin: PUBLIC_ORIGIN || true }))
@@ -31,20 +35,32 @@ app.use(express.json({ limit: '1mb' }))
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next)
 
 app.get('/api/health', (req, res) => {
-  res.json({ ok: true, name: 'Lumo', origin: PUBLIC_ORIGIN || 'localhost' })
+  res.json({ ok: true, name: 'Lumo', origin: PUBLIC_ORIGIN || 'localhost', requireAuthToWatch: REQUIRE_AUTH_TO_WATCH })
+})
+
+app.get('/api/config', (req, res) => {
+  res.json({ requireAuthToWatch: REQUIRE_AUTH_TO_WATCH })
 })
 
 // --- Auth ---------------------------------------------------------------
-app.post('/api/auth/register', wrap(async (req, res) => {
+const authLimit = rateLimit({ maxPerIdentity: 10, maxGlobal: 100 })
+
+app.post('/api/auth/register', authLimit, wrap(async (req, res) => {
   const { username, password } = req.body || {}
   const user = await register(username, password)
+  if (approvalRequired()) {
+    return res.status(201).json({ user: toPublic(user), pending: true, message: 'Compte créé. Un administrateur doit valider votre inscription avant de pouvoir vous connecter.' })
+  }
   res.status(201).json({ token: signToken(user), user: toPublic(user) })
 }))
 
-app.post('/api/auth/login', wrap(async (req, res) => {
+app.post('/api/auth/login', authLimit, wrap(async (req, res) => {
   const { username, password } = req.body || {}
   const user = await login(username, password)
   if (!user) return res.status(401).json({ error: 'Pseudo ou mot de passe incorrect.' })
+  if (user.status === 'pending') {
+    return res.status(403).json({ error: "Votre compte est en attente d'approbation par un administrateur." })
+  }
   res.json({ token: signToken(user), user: toPublic(user) })
 }))
 
@@ -55,6 +71,25 @@ app.get('/api/auth/me', requireAuth, (req, res) => {
 app.put('/api/me/settings', requireAuth, wrap(async (req, res) => {
   const user = await updateSettings(req.user.id, req.body || {})
   res.json({ user })
+}))
+
+// --- Administration (réservée aux admins) ----------------------------------
+app.get('/api/admin/users', requireAdmin, wrap(async (req, res) => {
+  res.json({ users: listUsers() })
+}))
+
+app.post('/api/admin/users/:id/approve', requireAdmin, wrap(async (req, res) => {
+  const id = String(req.params.id)
+  const user = await approveUser(id)
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' })
+  res.json({ user })
+}))
+
+app.delete('/api/admin/users/:id', requireAdmin, wrap(async (req, res) => {
+  const id = String(req.params.id)
+  const out = await deleteUser(id, req.user.id)
+  if (!out) return res.status(404).json({ error: 'Utilisateur introuvable.' })
+  res.json({ ok: true })
 }))
 
 // --- TMDB (clé cachée côté serveur) --------------------------------------
@@ -81,13 +116,13 @@ app.get('/api/title/tv/:id/season/:season', wrap(async (req, res) => {
   res.json({ episodes: await getSeasonEpisodes(Number(id), Number(season)) })
 }))
 
-app.post('/api/dl/:type/:id', wrap(async (req, res) => {
+app.post('/api/dl/:type/:id', authGate, wrap(async (req, res) => {
   const { type, id } = req.params
   const { season, episode } = req.query
   res.json(await startDownload(type, String(id), Number(season) || 1, Number(episode) || 1))
 }))
 
-app.get('/api/dl/:type/:id', wrap(async (req, res) => {
+app.get('/api/dl/:type/:id', authGate, wrap(async (req, res) => {
   const { type, id } = req.params
   const { season, episode } = req.query
   const key = type === 'tv'

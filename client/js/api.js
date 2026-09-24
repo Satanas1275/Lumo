@@ -54,6 +54,12 @@ export const api = {
 
   saveSettings: (settings) =>
     request('/api/me/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+
+  config: () => request('/api/config'),
+
+  adminUsers: () => request('/api/admin/users'),
+  adminApprove: (id) => request(`/api/admin/users/${id}/approve`, { method: 'POST', body: '{}' }),
+  adminDelete: (id) => request(`/api/admin/users/${id}`, { method: 'DELETE' }),
 }
 
 export function posterUrl(item, width = 'w342') {

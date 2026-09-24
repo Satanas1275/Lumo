@@ -18,10 +18,23 @@ function now() {
 async function load() {
   try {
     const raw = await fs.readFile(USERS_FILE, 'utf8')
-    users = JSON.parse(raw).users || []
+    const parsed = JSON.parse(raw)
+    users = (parsed.users || []).map(normalizeUser)
   } catch {
     users = []
   }
+}
+
+function normalizeUser(u) {
+  return {
+    ...u,
+    role: u.role === 'admin' ? 'admin' : 'member',
+    status: u.status === 'pending' ? 'pending' : 'active',
+  }
+}
+
+export function approvalRequired() {
+  return process.env.REQUIRE_ADMIN_APPROVAL === 'true'
 }
 
 let writeQueue = Promise.resolve()
@@ -55,6 +68,8 @@ function publicUser(u) {
   return {
     id: u.id,
     username: u.username,
+    role: u.role || 'member',
+    status: u.status || 'active',
     createdAt: u.createdAt,
     settings: u.settings,
   }
@@ -107,6 +122,8 @@ export async function register(username, password) {
   const user = {
     id: crypto.randomUUID(),
     username: name,
+    role: 'member',
+    status: approvalRequired() ? 'pending' : 'active',
     passwordHash: await bcrypt.hash(password, 10),
     createdAt: now(),
     settings: defaultSettings(),
@@ -142,6 +159,75 @@ export async function updateSettings(uid, patch) {
 
 export function toPublic(u) {
   return publicUser(u)
+}
+
+// ---------------------------------------------------------------------------
+// Administration (création d'admin uniquement via CLI / npm)
+// ---------------------------------------------------------------------------
+
+function findUser(id) {
+  return users.find((u) => u.id === id) || null
+}
+
+function validateName(name) {
+  if (name.length < 3 || name.length > 24) {
+    throw new UserError('Le pseudo doit faire entre 3 et 24 caractères.')
+  }
+  if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+    throw new UserError('Pseudo invalide (lettres, chiffres, _ . - uniquement).')
+  }
+}
+
+export function hasUsername(name, excludeId) {
+  return users.some((u) => u.username.toLowerCase() === String(name).toLowerCase() && u.id !== excludeId)
+}
+
+export async function addAdmin(username, password) {
+  const name = String(username || '').trim()
+  validateName(name)
+  if (hasUsername(name)) throw new UserError('Ce pseudo est déjà pris.')
+  if (typeof password !== 'string' || password.length < 10) {
+    throw new UserError('Le mot de passe admin doit faire au moins 10 caractères.')
+  }
+  if (password.toLowerCase().includes(name.toLowerCase())) {
+    throw new UserError('Le mot de passe ne doit pas contenir le pseudo.')
+  }
+
+  const user = {
+    id: crypto.randomUUID(),
+    username: name,
+    role: 'admin',
+    status: 'active',
+    passwordHash: await bcrypt.hash(password, 12),
+    createdAt: now(),
+    settings: defaultSettings(),
+  }
+  users.push(user)
+  await save()
+  return publicUser(user)
+}
+
+export function listUsers() {
+  return users.map(publicUser)
+}
+
+export async function approveUser(id) {
+  const u = findUser(id)
+  if (!u) return null
+  if (u.role === 'admin') throw new UserError('Un administrateur ne peut pas être approuvé.', 400)
+  u.status = 'active'
+  await save()
+  return publicUser(u)
+}
+
+export async function deleteUser(id, actorId) {
+  const u = findUser(id)
+  if (!u) return null
+  if (id === actorId) throw new UserError('Impossible de supprimer votre propre compte.', 400)
+  if (u.role === 'admin') throw new UserError('Un administrateur ne peut pas être supprimé via cette API.', 400)
+  users = users.filter((x) => x.id !== id)
+  await save()
+  return { ok: true }
 }
 
 await load()
