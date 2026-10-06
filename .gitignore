@@ -4,3 +4,6 @@ server/data/
 downloads/
 *.log
 .DS_Store
+
+# Scripts locaux de dev (téléchargement cinejoy)
+download_cinejoy.py

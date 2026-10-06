@@ -586,11 +586,13 @@ async function renderWatch(type, id, opts = {}) {
       const pct = st.ratio > 0 ? Math.round(st.ratio * 100) : null
       progressEl.style.width = pct != null ? `${pct}%` : '25%'
       progressEl.classList.toggle('indeterminate', pct == null)
-      statsEl.textContent = st.totalBytes
-        ? `${pct}% — ${fmtBytes(st.downloadedBytes)} / ${fmtBytes(st.totalBytes)}`
+      const parts = st.totalBytes
+        ? [`${pct}% — ${fmtBytes(st.downloadedBytes)} / ${fmtBytes(st.totalBytes)}`]
         : st.segmentsTotal
-          ? `${fmtBytes(st.downloadedBytes)} · ${st.segments}/${st.segmentsTotal} segments`
-          : `${fmtBytes(st.downloadedBytes)} téléchargés`
+          ? [`${fmtBytes(st.downloadedBytes)} · ${st.segments}/${st.segmentsTotal} segments`]
+          : [`${fmtBytes(st.downloadedBytes)} téléchargés`]
+      if (st.message) parts.push(escapeHtml(st.message))
+      statsEl.textContent = parts.join(' — ')
     }
   }
 

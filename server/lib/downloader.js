@@ -18,6 +18,26 @@ export const AGGREGATE_URL = (process.env.AGGREGATE_URL || 'http://localhost:300
 const HLS_TYPES = ['application/vnd.apple.mpegurl', 'application/x-mpegurl']
 const DIRECT_EXT = ['.mp4', '.m4v', '.webm', '.mov']
 
+// Durée minimale acceptée pour une source. Sous ce seuil (intros, bandes
+// annonces), la source est jugée mauvaise et on passe à la suivante.
+const MIN_SECONDS = Number(process.env.MIN_SOURCE_SECONDS || 60) || 60
+
+// Sources à exclure (hostname) : certains "firestream" ne servent qu'une
+// intro. Complétable via DOWNLOAD_EXCLUDE_SOURCES (liste séparée par virgules).
+const BLOCKED_HOSTS = new Set(['firestream.to', 'firestream.top'])
+for (const h of (process.env.DOWNLOAD_EXCLUDE_SOURCES || '').split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+  BLOCKED_HOSTS.add(h)
+}
+
+export function isBlockedUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase()
+    return [...BLOCKED_HOSTS].some((b) => host === b || host.endsWith('.' + b))
+  } catch {
+    return false
+  }
+}
+
 const jobs = new Map()
 
 function reqHeaders(referer) {
@@ -38,6 +58,40 @@ function readdirSafe(dir) {
     return readdirSync(dir)
   } catch {
     return []
+  }
+}
+
+// Durée réelle d'un média via ffprobe (ou null si indisponible/illisible).
+function probeDuration(target) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', target],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+    let out = ''
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(null)
+    }, 15000)
+    child.stdout.on('data', (c) => (out += c))
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(null)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) return resolve(null)
+      const dur = parseFloat(out.trim())
+      resolve(Number.isFinite(dur) && dur > 0 ? dur : null)
+    })
+  })
+}
+
+function assertLongEnough(dur, label) {
+  if (dur === null) return
+  if (dur < MIN_SECONDS) {
+    throw new Error(`${label} : durée ${Math.round(dur)}s < ${MIN_SECONDS}s — probablement une intro, rejetée.`)
   }
 }
 
@@ -70,6 +124,7 @@ export async function getStatus(key) {
       title: job.title || null,
       quality: job.quality || null,
       error: job.error || null,
+      message: job.message || null,
       downloadedBytes: job.downloadedBytes || 0,
       totalBytes: job.totalBytes || 0,
       segments: job.segments || 0,
@@ -107,7 +162,7 @@ function collectCandidates(meta) {
 
   function walk(v) {
     if (typeof v === 'string' && /\.(m3u8|mp4|m4v|webm|mov)(\?|$)/i.test(v)) {
-      if (/^https?:\/\//.test(v)) found.push(v)
+      if (/^https?:\/\//.test(v) && !isBlockedUrl(v)) found.push(v)
       return
     }
     if (Array.isArray(v)) return v.forEach(walk)
@@ -149,6 +204,7 @@ function collectEmbedPages(meta) {
       const clean = v.replace(/#.*$/, '')
       if (/\.(m3u8|mp4|m4v|webm|mov)(\?|$)/i.test(clean)) return
       if (/\.(jpe?g|png|webp|gif|svg|css|js|json)(\?|$)/i.test(clean)) return
+      if (isBlockedUrl(clean)) return
       if (seen.has(clean)) return
       seen.add(clean)
       pages.push(clean)
@@ -162,10 +218,56 @@ function collectEmbedPages(meta) {
   return pages
 }
 
+// ---------------------------------------------------------------------------
+// Provider cinejoy (spécifique) : gestion différente — les liens sont résolus
+// par l'API de l'agrégateur qui renvoie des playlists HLS servies via un proxy
+// (/api/cinejoy/stream). On télécharge ces playlists comme n'importe quelle
+// source HLS ; le flux reste ainsi servi par le serveur.
+// ---------------------------------------------------------------------------
+
+const CINEJOY_QUALITY = { '2160p': 4, '1080p': 3, hd: 2, '720p': 2, '480p': 1, '360p': 1 }
+
+async function fetchCinejoy(type, id, season, episode) {
+  const ep = type === 'tv'
+    ? `/tv/${id}/${season || 1}/${episode || 1}`
+    : `/movie/${id}`
+  const url = `${AGGREGATE_URL}/api/cinejoy${ep}`
+  const res = await fetch(url, { headers: reqHeaders() })
+  if (!res.ok) return null
+  const data = await res.json()
+  if (!data || data.failure) return null
+  return data
+}
+
+// Liens cinejoy en candidats HLS (via le proxy de l'agrégateur), meilleure
+// langue disponible (vostfr puis vf), meilleure qualité en premier.
+export async function cinejoyCandidates(type, id, season, episode) {
+  let data
+  try {
+    data = await fetchCinejoy(type, id, season, episode)
+  } catch {
+    return []
+  }
+  if (!data) return []
+  const out = []
+  const seen = new Set()
+  for (const lang of ['vostfr', 'vf']) {
+    for (const link of (data.links || {})[lang] || []) {
+      const q = String(link.quality || '').toLowerCase()
+      const tag = `cinejoy ${lang} ${link.server || ''} ${q}`.trim()
+      if (link.playUrl && !seen.has(link.playUrl)) {
+        seen.add(link.playUrl)
+        out.push({ url: link.playUrl, referer: null, tag, quality: q })
+      }
+    }
+  }
+  return out.sort((a, b) => (CINEJOY_QUALITY[b.quality] || 0) - (CINEJOY_QUALITY[a.quality] || 0))
+}
+
 // Scrape les pages embed : on cherche des URLs de médias (m3u8/mp4...) dans
 // le HTML (balises source, variable file, ...). Parallélisé avec un plafond
 // raisonnable : certaines sources ne se trouvent qu'à la fin de la liste.
-async function scrapeMediaFromEmbeds(pages) {
+async function scrapeMediaFromEmbeds(pages, job) {
   const re = /(?:https?:)?\/\/[^"'\s<>]+?\.(m3u8|mp4|m4v|webm|mov)(?:[?#][^"'\s<>]*)?/gi
   const target = pages.slice(0, 30)
   const found = []
@@ -181,7 +283,7 @@ async function scrapeMediaFromEmbeds(pages) {
       for (const m of text.matchAll(re)) {
         const clean = m[0].replace(/#.*$/, '')
         const full = resolveUrl(page, clean)
-        if (/^https?:\/\//.test(full)) found.push(full)
+        if (/^https?:\/\//.test(full) && !isBlockedUrl(full)) found.push(full)
       }
     } catch {
       // page suivante
@@ -190,6 +292,11 @@ async function scrapeMediaFromEmbeds(pages) {
 
   const pool = 5
   for (let i = 0; i < target.length; i += pool) {
+    if (job) {
+      progressJob(job, {
+        message: `Scraping des lecteurs… (${Math.min(i + pool, target.length)}/${target.length})`,
+      })
+    }
     await Promise.all(target.slice(i, i + pool).map(scrapeOne))
   }
 
@@ -320,10 +427,10 @@ function resolveUrl(base, rel) {
 
 const KEY_CACHE = new Map()
 
-async function fetchKey(uri, playlistUrl) {
+async function fetchKey(uri, playlistUrl, referer) {
   if (KEY_CACHE.has(uri)) return KEY_CACHE.get(uri)
   const res = await fetch(resolveUrl(playlistUrl, uri), {
-    headers: reqHeaders(new URL(playlistUrl).origin),
+    headers: reqHeaders(referer || new URL(playlistUrl).origin),
   })
   if (!res.ok) throw new Error(`Clé de chiffrement indisponible (${res.status})`)
   const key = Buffer.from(await res.arrayBuffer())
@@ -337,9 +444,9 @@ function defaultIv(sequence) {
   return buf
 }
 
-async function downloadSegment(seg, sequence, playlistUrl, outPath, job) {
+async function downloadSegment(seg, sequence, playlistUrl, outPath, job, referer) {
   const url = resolveUrl(playlistUrl, seg.uri)
-  const headers = reqHeaders(new URL(playlistUrl).origin)
+  const headers = reqHeaders(referer || new URL(playlistUrl).origin)
 
   if (seg.byterange) {
     const [len, offset] = seg.byterange.split('@').map(Number)
@@ -361,7 +468,7 @@ async function downloadSegment(seg, sequence, playlistUrl, outPath, job) {
   }
 
   if (seg.key && seg.key.method === 'AES-128' && seg.key.uri) {
-    const key = await fetchKey(seg.key.uri, playlistUrl)
+    const key = await fetchKey(seg.key.uri, playlistUrl, referer)
     const iv = seg.key.iv || defaultIv(sequence)
     const decipher = createDecipheriv('aes-128-cbc', key, iv)
     data = Buffer.concat([decipher.update(data), decipher.final()])
@@ -374,9 +481,9 @@ async function downloadSegment(seg, sequence, playlistUrl, outPath, job) {
   })
 }
 
-async function downloadHls(url, destDir, job) {
+async function downloadHls(url, destDir, job, referer) {
   const origin = new URL(url).origin
-  const masterRes = await fetch(url, { headers: reqHeaders(origin) })
+  const masterRes = await fetch(url, { headers: reqHeaders(referer || origin) })
   if (!masterRes.ok) throw new Error(`Playlist indisponible (${masterRes.status})`)
   const masterText = (await masterRes.text()).trim()
   const master = parsePlaylist(masterText)
@@ -389,7 +496,7 @@ async function downloadHls(url, destDir, job) {
     const variant = pickVariant(master.variants)
     playlistUrl = resolveUrl(url, variant.uri)
     quality = variant.resolution || null
-    const vres = await fetch(playlistUrl, { headers: reqHeaders(origin) })
+    const vres = await fetch(playlistUrl, { headers: reqHeaders(referer || origin) })
     if (!vres.ok) throw new Error(`Variant indisponible (${vres.status})`)
     playlistText = await vres.text()
     await writeFile(join(destDir, 'source.m3u8'), masterText)
@@ -398,7 +505,11 @@ async function downloadHls(url, destDir, job) {
   const playlist = parsePlaylist(playlistText)
   if (!playlist.segments.length) throw new Error('Aucun segment dans la playlist')
 
-  progressJob(job, { quality, segmentsTotal: playlist.segments.length })
+  // Rejet précoce des sources trop courtes (avant de télécharger les segments)
+  const extinfTotal = playlist.segments.reduce((a, s) => a + (s.duration || 0), 0)
+  assertLongEnough(extinfTotal || null, 'Playlist trop courte')
+
+  progressJob(job, { quality, segmentsTotal: playlist.segments.length, message: 'Téléchargement des segments…' })
 
   const segDir = join(destDir, 'segments')
   await mkdir(segDir, { recursive: true })
@@ -413,7 +524,7 @@ async function downloadHls(url, destDir, job) {
   let mapDone = false
   if (playlist.segments[0]?.map) {
     const mapRes = await fetch(resolveUrl(playlistUrl, playlist.segments[0].map.uri), {
-      headers: reqHeaders(origin),
+      headers: reqHeaders(referer || origin),
     })
     if (!mapRes.ok) throw new Error(`Segment d'initialisation indisponible (${mapRes.status})`)
     await writeFile(join(segDir, 'init.mp4'), Buffer.from(await mapRes.arrayBuffer()))
@@ -423,7 +534,7 @@ async function downloadHls(url, destDir, job) {
   for (let i = 0; i < playlist.segments.length; i++) {
     const seg = playlist.segments[i]
     const name = `seg${String(i).padStart(5, '0')}.ts`
-    await downloadSegment(seg, playlist.mediaSequence + i, playlistUrl, join(segDir, name), job)
+    await downloadSegment(seg, playlist.mediaSequence + i, playlistUrl, join(segDir, name), job, referer)
     if (mapDone) {
       localLines.push('#EXT-X-MAP:URI="segments/init.mp4"')
       mapDone = false
@@ -434,6 +545,10 @@ async function downloadHls(url, destDir, job) {
   localLines.push('#EXT-X-ENDLIST')
 
   await writeFile(join(destDir, 'index.m3u8'), localLines.join('\n') + '\n')
+
+  // Vérification réelle avec ffprobe (les EXTINF peuvent mentir)
+  await assertLongEnough(await probeDuration(join(destDir, 'index.m3u8')), 'Vidéo trop courte')
+
   const actual = job.sizes.length === playlist.segments.length
     ? job.sizes.reduce((a, b) => a + b, 0)
     : job.downloadedBytes
@@ -451,17 +566,21 @@ async function downloadHls(url, destDir, job) {
 // Téléchargement fichier direct (mp4/webm...)
 // ---------------------------------------------------------------------------
 
-async function downloadDirect(url, destDir, job) {
+async function downloadDirect(url, destDir, job, referer) {
   const ext = DIRECT_EXT.find((e) => url.toLowerCase().includes(e)) || '.mp4'
   const target = join(destDir, `video${ext}`)
-  const res = await fetch(url, { headers: reqHeaders(new URL(url).origin) })
+  const res = await fetch(url, { headers: reqHeaders(referer || new URL(url).origin) })
   if (!res.ok) throw new Error(`Vidéo indisponible (${res.status})`)
 
   const cl = Number(res.headers.get('content-length') || 0)
-  if (cl) progressJob(job, { totalBytes: cl })
+  if (cl) progressJob(job, { totalBytes: cl, message: 'Téléchargement de la vidéo…' })
 
   await pipeline(res.body, createWriteStream(target))
   const fstat = await stat(target)
+
+  // Rejet des fichiers trop courts (intros) si la durée est mesurable
+  await assertLongEnough(await probeDuration(target), 'Vidéo trop courte')
+
   progressJob(job, {
     status: 'ready',
     downloadedBytes: fstat.size,
@@ -524,10 +643,21 @@ export async function ytdlpDownload(page, destDir, job) {
       }
     })
 
+    let errBuf = ''
+    child.stderr.on('data', (c) => {
+      errBuf = (errBuf + c).slice(-4000)
+    })
+
     child.on('close', (code) => {
       clearTimeout(timer)
       if (code !== 0) {
-        reject(new Error(`yt-dlp a échoué sur ${page} (code ${code})`))
+        const detail = errBuf
+          .split(/\r?\n/)
+          .map((l) => l.trim().replace(/^ERROR:\s*/i, ''))
+          .filter(Boolean)
+          .slice(-2)
+          .join(' · ')
+        reject(new Error(`yt-dlp a échoué sur ${page}${detail ? ` — ${detail}` : ` (code ${code})`}`))
         return
       }
       const file = readdirSync(destDir).find((f) => /^video\./.test(f))
@@ -546,10 +676,13 @@ async function tryYtdlpFallback(pages, key, job) {
   }
   const destDir = folderFor(key)
   let lastErr = null
+  progressJob(job, { downloadedBytes: 0, totalBytes: 0, ratio: 0, segments: 0, segmentsTotal: 0, quality: 'fallback' })
   for (const page of pages.slice(0, 5)) {
     try {
+      progressJob(job, { message: `yt-dlp : essai de ${new URL(page).host}…` })
       const file = await ytdlpDownload(page, destDir, job)
       const fstat = await stat(join(destDir, file))
+      await assertLongEnough(await probeDuration(join(destDir, file)), 'Vidéo (yt-dlp) trop courte')
       progressJob(job, {
         status: 'ready',
         downloadedBytes: fstat.size,
@@ -594,6 +727,7 @@ export async function startDownload(type, id, season, episode) {
     title: null,
     quality: null,
     error: null,
+    message: 'Récupération des sources…',
     totalBytes: 0,
     downloadedBytes: 0,
     ratio: 0,
@@ -620,9 +754,16 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
 
     let candidates = collectCandidates(meta)
     const pages = collectEmbedPages(meta)
+
+    // Aucune source directe : on demande cinejoy (provider spécifique, servi
+    // par l'agrégateur) puis, à défaut, on scrappe les pages embed.
     if (!candidates.length) {
-      // Pas d'URL directe : on scrappe les pages embed pour en extraire une.
-      candidates = await scrapeMediaFromEmbeds(pages)
+      progressJob(job, { message: 'Recherche sur cinejoy…' })
+      candidates = await cinejoyCandidates(type, id, season, episode)
+    }
+    if (!candidates.length) {
+      // Toujours rien : scraping des pages embed.
+      candidates = await scrapeMediaFromEmbeds(pages, job)
     }
     if (!candidates.length) {
       // Ultime recours : yt-dlp sur les pages embed.
@@ -630,10 +771,13 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
       return
     }
 
-    for (const url of candidates) {
+    for (const item of candidates) {
+      const url = typeof item === 'string' ? item : item.url
+      const referer = typeof item === 'string' ? null : item.referer || null
       try {
+        progressJob(job, { message: `${item.tag || ''} — test de ${new URL(url).host}…`.trim() })
         const probe = await fetch(url, {
-          headers: { ...reqHeaders(new URL(url).origin), Range: 'bytes=0-65536' },
+          headers: { ...reqHeaders(referer || new URL(url).origin), Range: 'bytes=0-65536' },
         })
         if (!probe.ok) throw new Error(`réponse ${probe.status}`)
         const ctype = probe.headers.get('content-type') || ''
@@ -643,17 +787,28 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
         const isMp4 = ctype.includes('video') || buf.length > 11 && buf.readUInt32BE(4) === 0x66747970 /* ftyp */
 
         if (isM3U8) {
-          await downloadHls(url, folderFor(key), job)
+          await downloadHls(url, folderFor(key), job, referer)
           return
         }
         if (isMp4) {
-          await downloadDirect(url, folderFor(key), job)
+          await downloadDirect(url, folderFor(key), job, referer)
           return
         }
         throw new Error('format non reconnu')
       } catch (err) {
         lastErr = err
+        // Une source rejetée (intro trop courte, etc.) laisse des fichiers :
+        // on nettoie avant d'essayer la candidat suivant.
+        await rm(folderFor(key), { recursive: true, force: true }).catch(() => {})
+        await mkdir(folderFor(key), { recursive: true }).catch(() => {})
       }
+    }
+
+    // Tous les candidats ont échoué (intros trop courtes, formats, 403...) :
+    // dernier espoir, on laisse yt-dlp tenter sa chance sur les pages embed.
+    if (pages.length) {
+      await tryYtdlpFallback(pages, key, job)
+      return
     }
     throw new Error(`Aucune source exploitable. ${lastErr ? `Dernière erreur : ${lastErr.message}` : ''}`.trim())
   } catch (err) {
