@@ -3,7 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import { register, login, signToken, toPublic, updateSettings, approveUser, deleteUser, listUsers, approvalRequired } from './lib/users.js'
+import { register, login, signToken, toPublic, updateSettings, approveUser, deleteUser, listUsers, getConfig, setConfig, approvalRequired } from './lib/users.js'
 import { requireAuth, requireAdmin } from './lib/auth.js'
 import { rateLimit } from './lib/ratelimit.js'
 import {
@@ -39,7 +39,7 @@ app.get('/api/health', (req, res) => {
 })
 
 app.get('/api/config', (req, res) => {
-  res.json({ requireAuthToWatch: REQUIRE_AUTH_TO_WATCH })
+  res.json({ requireAuthToWatch: REQUIRE_AUTH_TO_WATCH, allowRegistration: getConfig().allowRegistration })
 })
 
 // --- Auth ---------------------------------------------------------------
@@ -77,6 +77,14 @@ app.put('/api/me/settings', requireAuth, wrap(async (req, res) => {
 app.get('/api/admin/users', requireAdmin, wrap(async (req, res) => {
   res.json({ users: listUsers() })
 }))
+
+app.get('/api/admin/settings', requireAdmin, async (req, res) => {
+  res.json(getConfig())
+})
+
+app.put('/api/admin/settings', requireAdmin, async (req, res) => {
+  res.json(await setConfig(req.body || {}))
+})
 
 app.post('/api/admin/users/:id/approve', requireAdmin, wrap(async (req, res) => {
   const id = String(req.params.id)

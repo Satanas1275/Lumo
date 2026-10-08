@@ -108,6 +108,8 @@ async function main() {
     const admin = await addAdmin(username, password)
     console.log(`✅ Admin « ${admin.username} » créé (${new Date(admin.createdAt).toLocaleString('fr-FR')}).`)
     console.log('Vous pouvez vous connecter sur Lumo avec ce compte.')
+    console.log('⚠️ Redémarrez le serveur Lumo pour charger ce compte — tant que le serveur tourne,')
+    console.log('   il travaille sur une copie en mémoire et une écriture concurrente pourrait l\'écraser.')
   } catch (err) {
     console.error(`❌ ${err.message}`)
     process.exit(1)

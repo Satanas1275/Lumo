@@ -60,6 +60,8 @@ export const api = {
   adminUsers: () => request('/api/admin/users'),
   adminApprove: (id) => request(`/api/admin/users/${id}/approve`, { method: 'POST', body: '{}' }),
   adminDelete: (id) => request(`/api/admin/users/${id}`, { method: 'DELETE' }),
+  adminSettings: () => request('/api/admin/settings'),
+  adminSetSettings: (patch) => request('/api/admin/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 }
 
 export function posterUrl(item, width = 'w342') {

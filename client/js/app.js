@@ -642,7 +642,8 @@ async function renderAdmin() {
 
   app.innerHTML = `<div class="spinner"></div>`
   try {
-    const { users } = await api.adminUsers()
+    const [{ users }, settings] = await Promise.all([api.adminUsers(), api.adminSettings()])
+    const allowRegistration = settings.allowRegistration !== false
     const pending = users.filter((u) => u.status === 'pending')
     const rest = users.filter((u) => u.status !== 'pending')
 
@@ -671,6 +672,18 @@ async function renderAdmin() {
           <h2 class="section-title">Administration</h2>
           <p class="muted">Les comptes en attente doivent être approuvés avant de pouvoir se connecter.</p>
 
+          <h3 class="admin-sub">Réglages</h3>
+          <div class="admin-row">
+            <div class="admin-ident">
+              <span class="admin-name">Nouvelles inscriptions</span>
+              <span class="admin-created">Autoriser la création de comptes sur le site</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="reg-toggle" ${allowRegistration ? 'checked' : ''} />
+              <span class="slider"></span>
+            </label>
+          </div>
+
           ${pending.length ? `
             <h3 class="admin-sub">En attente (${pending.length})</h3>
             <div class="admin-list">${pending.map(row).join('')}</div>` : ''}
@@ -679,6 +692,22 @@ async function renderAdmin() {
           <div class="admin-list">${rest.map(row).join('')}</div>
         </div>
       </div>`
+
+    const regToggle = app.querySelector('#reg-toggle')
+    if (regToggle) {
+      regToggle.addEventListener('change', async () => {
+        const on = regToggle.checked
+        regToggle.disabled = true
+        try {
+          await api.adminSetSettings({ allowRegistration: on })
+        } catch (err) {
+          regToggle.checked = !on
+          showError(err.message)
+        } finally {
+          regToggle.disabled = false
+        }
+      })
+    }
 
     app.querySelectorAll('[data-approve]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -739,6 +768,10 @@ function openAuth() {
   modalRoot.appendChild(box)
 
   let mode = 'login'
+  let allowRegistration = true
+  api.config().then((c) => {
+    allowRegistration = c.allowRegistration !== false
+  }).catch(() => {})
   const title = box.querySelector('#auth-title')
   const sub = box.querySelector('#auth-sub')
   const submit = box.querySelector('#auth-submit')
@@ -748,6 +781,10 @@ function openAuth() {
   const passwordInput = box.querySelector('#auth-password')
 
   function setMode(m) {
+    if (m === 'register' && allowRegistration === false) {
+      errorEl.textContent = "L'inscription est désactivée par l'administrateur."
+      return
+    }
     mode = m
     title.textContent = m === 'login' ? 'Connexion' : 'Créer un compte'
     sub.textContent =

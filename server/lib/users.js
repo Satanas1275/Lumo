@@ -10,6 +10,7 @@ const DATA_DIR = join(ROOT, 'data')
 const USERS_FILE = join(DATA_DIR, 'users.json')
 
 let users = []
+let config = { allowRegistration: true }
 
 function now() {
   return new Date().toISOString()
@@ -20,8 +21,12 @@ async function load() {
     const raw = await fs.readFile(USERS_FILE, 'utf8')
     const parsed = JSON.parse(raw)
     users = (parsed.users || []).map(normalizeUser)
+    config = {
+      allowRegistration: parsed.config?.allowRegistration !== false,
+    }
   } catch {
     users = []
+    config = { allowRegistration: true }
   }
 }
 
@@ -42,7 +47,7 @@ async function save() {
   writeQueue = writeQueue.then(async () => {
     await fs.mkdir(DATA_DIR, { recursive: true })
     const tmp = USERS_FILE + '.tmp'
-    await fs.writeFile(tmp, JSON.stringify({ users }, null, 2))
+    await fs.writeFile(tmp, JSON.stringify({ users, config }, null, 2))
     await fs.rename(tmp, USERS_FILE)
   })
   return writeQueue
@@ -106,6 +111,9 @@ export class UserError extends Error {
 }
 
 export async function register(username, password) {
+  if (!config.allowRegistration) {
+    throw new UserError("L'inscription est désactivée par l'administrateur.", 403)
+  }
   const name = String(username || '').trim()
   if (name.length < 3 || name.length > 24) {
     throw new UserError('Le pseudo doit faire entre 3 et 24 caractères.')
@@ -209,6 +217,18 @@ export async function addAdmin(username, password) {
 
 export function listUsers() {
   return users.map(publicUser)
+}
+
+export function getConfig() {
+  return { allowRegistration: config.allowRegistration }
+}
+
+export async function setConfig(patch) {
+  if (typeof patch.allowRegistration === 'boolean') {
+    config.allowRegistration = patch.allowRegistration
+  }
+  await save()
+  return getConfig()
 }
 
 export async function approveUser(id) {
