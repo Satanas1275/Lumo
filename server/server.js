@@ -16,7 +16,7 @@ import {
 import {
   AGGREGATE_URL,
   DOWNLOAD_DIR,
-  getStatus,
+  getStreamStatus,
   startDownload,
 } from './lib/downloader.js'
 
@@ -126,17 +126,14 @@ app.get('/api/title/tv/:id/season/:season', wrap(async (req, res) => {
 
 app.post('/api/dl/:type/:id', authGate, wrap(async (req, res) => {
   const { type, id } = req.params
-  const { season, episode } = req.query
-  res.json(await startDownload(type, String(id), Number(season) || 1, Number(episode) || 1))
+  const { season, episode, quality } = req.query
+  res.json(await startDownload(type, String(id), Number(season) || 1, Number(episode) || 1, quality))
 }))
 
 app.get('/api/dl/:type/:id', authGate, wrap(async (req, res) => {
   const { type, id } = req.params
-  const { season, episode } = req.query
-  const key = type === 'tv'
-    ? `tv/${id}/s${Number(season) || 1}e${Number(episode) || 1}`
-    : `movie/${id}`
-  res.json(await getStatus(key))
+  const { season, episode, quality } = req.query
+  res.json(await getStreamStatus(type, String(id), Number(season) || 1, Number(episode) || 1, quality))
 }))
 
 // --- Frontend statique ----------------------------------------------------
@@ -166,3 +163,4 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`Lumo backend sur http://localhost:${PORT}${PUBLIC_ORIGIN ? ` (origine: ${PUBLIC_ORIGIN})` : ''}`)
 })
+

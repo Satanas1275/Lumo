@@ -32,6 +32,7 @@ export const api = {
       q.set('season', opts.season || 1)
       q.set('episode', opts.episode || 1)
     }
+    if (opts.quality) q.set('quality', opts.quality)
     return request(`/api/dl/${type}/${id}?${q}`)
   },
 
@@ -41,6 +42,7 @@ export const api = {
       q.set('season', opts.season || 1)
       q.set('episode', opts.episode || 1)
     }
+    if (opts.quality) q.set('quality', opts.quality)
     return request(`/api/dl/${type}/${id}?${q}`, { method: 'POST', body: '{}' })
   },
 

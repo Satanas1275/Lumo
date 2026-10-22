@@ -1,6 +1,6 @@
 import { createDecipheriv } from 'crypto'
 import { spawn } from 'child_process'
-import { mkdir, readdir, rm, stat, writeFile } from 'fs/promises'
+import { mkdir, readFile, readdir, rm, stat, writeFile } from 'fs/promises'
 import { createWriteStream, readdirSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
@@ -53,7 +53,7 @@ function progressJob(job, patch) {
   if (job.totalBytes) job.ratio = Math.max(0, Math.min(1, job.downloadedBytes / job.totalBytes))
 }
 
-function readdirSafe(dir) {
+export function readdirSafe(dir) {
   try {
     return readdirSync(dir)
   } catch {
@@ -95,9 +95,103 @@ function assertLongEnough(dur, label) {
   }
 }
 
-export function pathKey(type, id, season, episode) {
-  if (type === 'tv') return `tv/${id}/s${season || 1}e${episode || 1}`
-  return `movie/${id}`
+// Hauteur de la piste vidéo d'un média via ffprobe (ou null si indisponible).
+function probeHeight(target) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      'ffprobe',
+      ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=height', '-of', 'csv=p=0', target],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+    let out = ''
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL')
+      resolve(null)
+    }, 15000)
+    child.stdout.on('data', (c) => (out += c))
+    child.on('error', () => {
+      clearTimeout(timer)
+      resolve(null)
+    })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      if (code !== 0) return resolve(null)
+      const h = Number.parseInt(out.trim(), 10)
+      resolve(Number.isFinite(h) && h > 0 ? h : null)
+    })
+  })
+}
+
+// Lance ffmpeg ; rejette si le binaire est absent ou si l'encodage échoue.
+export function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    let child
+    try {
+      child = spawn('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+    } catch (err) {
+      reject(new Error(`Impossible de lancer ffmpeg : ${err.message}`))
+      return
+    }
+    let errBuf = ''
+    child.stderr.on('data', (c) => {
+      errBuf = (errBuf + c).slice(-4000)
+    })
+    child.on('error', () => reject(new Error('ffmpeg introuvable. Installez-le pour la sélection de qualité.')))
+    child.on('close', (code) => {
+      if (code === 0) return resolve()
+      const detail = errBuf.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-2).join(' · ')
+      reject(new Error(`Encodage ffmpeg échoué (code ${code})${detail ? ` — ${detail}` : ''}`))
+    })
+  })
+}
+
+// Transcode `input` vers un MP4 H.264/AAC en `targetH` de haut. La largeur est
+// calculée automatiquement (multiple de 2) pour préserver le ratio.
+async function transcodeToHeight(input, destDir, targetH, job) {
+  const outName = `video_${targetH}p.mp4`
+  const dest = join(destDir, outName)
+  progressJob(job, {
+    status: 'downloading',
+    ratio: 0,
+    downloadedBytes: 0,
+    totalBytes: 0,
+    segments: 0,
+    segmentsTotal: 0,
+    quality: `${targetH}p`,
+    message: `Encodage en ${targetH}p…`,
+  })
+  await runFfmpeg([
+    '-i', input,
+    '-vf', `scale=-2:${targetH}`,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+    '-c:a', 'aac', '-b:a', '128k',
+    '-movflags', '+faststart',
+    dest,
+  ])
+  return outName
+}
+
+// Hauteur cible (en pixels) déduite du paramètre `quality` du client.
+// Renvoie null pour "max" (qualité source, aucune conversion).
+export function targetHeight(quality) {
+  if (quality === undefined || quality === null) return null
+  const q = String(quality).trim().toLowerCase()
+  if (!q || q === 'max' || q === 'source') return null
+  const h = Number(q.replace(/p$/, ''))
+  return Number.isFinite(h) && h > 0 ? h : null
+}
+
+function variantHeight(variant) {
+  return Number(variant?.resolution?.split('x')?.[1] || 0)
+}
+
+export function pathKey(type, id, season, episode, quality) {
+  const base = type === 'tv' ? `tv/${id}/s${season || 1}e${episode || 1}` : `movie/${id}`
+  // Toujours stocker la source (max) sous la clé de base. La qualité est
+  // gérée au niveau de la lecture/transcodage, pas du téléchargement.
+  return base
 }
 
 export function folderFor(key) {
@@ -137,6 +231,103 @@ export async function getStatus(key) {
     return { key, status: 'ready', playUrl: latestReady(key) }
   }
   return { key, status: 'idle' }
+}
+
+// ---------------------------------------------------------------------------
+// Transcodage à la volée depuis le fichier local (changement de qualité)
+// La source n'est téléchargée qu'une fois (qualité max) ; les qualités
+// inférieures sont obtenues en encodant en HLS le fichier déjà local, sans
+// aucun nouveau téléchargement.
+// ---------------------------------------------------------------------------
+
+const encodes = new Map() // "baseKey|qH" -> { child, dir }
+const sourceHeights = new Map() // baseKey -> hauteur native (ou null)
+
+function encodeDir(baseKey, h) {
+  return join(folderFor(baseKey), `q${h}`)
+}
+
+// Convertit une URL de lecture locale (/dl/xxx) en chemin disque.
+function sourceFsPath(playUrl) {
+  const rel = String(playUrl).replace(/^\/dl\//, '')
+  return join(DOWNLOAD_DIR, rel)
+}
+
+async function playlistReady(playlist) {
+  try {
+    const text = await readFile(playlist, 'utf8')
+    // Au moins un segment présent = lisible.
+    return /\.ts(\?|$)/m.test(text)
+  } catch {
+    return false
+  }
+}
+
+async function startEncode(baseKey, h, sourcePath) {
+  const id = `${baseKey}|q${h}`
+  if (encodes.has(id)) return
+  const dir = encodeDir(baseKey, h)
+  // Réservation synchrone pour éviter un double démarrage concurrent.
+  encodes.set(id, { child: null, dir })
+  await rm(dir, { recursive: true, force: true }).catch(() => {})
+  await mkdir(dir, { recursive: true })
+
+  const child = spawn('ffmpeg', [
+    '-hide_banner', '-loglevel', 'error', '-y',
+    '-i', sourcePath,
+    '-vf', `scale=-2:${h}`,
+    '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+    '-c:a', 'aac', '-b:a', '128k',
+    '-f', 'hls', '-hls_time', '4', '-hls_list_size', '0',
+    '-hls_segment_filename', join(dir, 'seg%05d.ts'),
+    join(dir, 'index.m3u8'),
+  ], { stdio: ['ignore', 'ignore', 'ignore'] })
+
+  const entry = encodes.get(id)
+  if (entry) entry.child = child
+  const done = () => {
+    if (encodes.get(id)?.child === child) encodes.delete(id)
+  }
+  child.on('error', done)
+  child.on('close', done)
+}
+
+// Renvoie le statut de lecture pour la qualité demandée. Pour "max", renvoie
+// directement la source. Pour une qualité inférieure, lance (si besoin) un
+// encodage HLS à la volée depuis le fichier local et renvoie son statut.
+export async function getStreamStatus(type, id, season, episode, quality) {
+  const baseKey = pathKey(type, id, season, episode)
+  const st = await getStatus(baseKey)
+  const h = targetHeight(quality)
+
+  if (!h || st.status !== 'ready' || !st.playUrl) return st
+
+  const srcPath = sourceFsPath(st.playUrl)
+
+  // Hauteur native de la source (mise en cache).
+  if (!sourceHeights.has(baseKey)) {
+    sourceHeights.set(baseKey, await probeHeight(srcPath))
+  }
+  const nativeH = sourceHeights.get(baseKey)
+
+  // Source déjà <= qualité demandée : on sert la source telle quelle.
+  if (nativeH && nativeH <= h) {
+    return { ...st, quality: `${nativeH}p`, playUrl: st.playUrl }
+  }
+
+  const playlist = join(encodeDir(baseKey, h), 'index.m3u8')
+  if (await playlistReady(playlist)) {
+    return { ...st, quality: `${h}p`, playUrl: `/dl/${baseKey}/q${h}/index.m3u8` }
+  }
+
+  startEncode(baseKey, h, srcPath).catch(() => {})
+  return {
+    ...st,
+    quality: `${h}p`,
+    status: 'downloading',
+    message: `Encodage en ${h}p depuis la copie locale…`,
+    playUrl: null,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -461,11 +652,6 @@ async function downloadSegment(seg, sequence, playlistUrl, outPath, job, referer
 
   const cl = Number(res.headers.get('content-length') || 0)
   if (cl > 0) job.sizes.push(data.length || cl)
-  if (!job.knownTotal && job.sizes.length && job.segmentsTotal) {
-    // Estimation progressive : moyenne connue × nombre total de segments
-    const avg = job.sizes.reduce((a, b) => a + b, 0) / job.sizes.length
-    progressJob(job, { totalBytes: Math.round(avg * job.segmentsTotal), knownTotal: true })
-  }
 
   if (seg.key && seg.key.method === 'AES-128' && seg.key.uri) {
     const key = await fetchKey(seg.key.uri, playlistUrl, referer)
@@ -475,13 +661,24 @@ async function downloadSegment(seg, sequence, playlistUrl, outPath, job, referer
   }
 
   await writeFile(outPath, data)
-  progressJob(job, {
-    downloadedBytes: job.downloadedBytes + data.length,
-    segments: job.segments + 1,
-  })
+
+  const downloadedBytes = job.downloadedBytes + data.length
+  const segments = job.segments + 1
+  const patch = { downloadedBytes, segments }
+
+  // Estimation du total à partir de la taille moyenne RÉELLE des segments
+  // déjà téléchargés. Contrairement à une estimation figée sur le 1er segment,
+  // elle est toujours >= bytes téléchargés (ratio <= 100%) et converge vers la
+  // taille finale exacte quand tous les segments sont téléchargés.
+  if (job.segmentsTotal) {
+    const avg = downloadedBytes / segments
+    patch.totalBytes = Math.max(Math.round(avg * job.segmentsTotal), downloadedBytes)
+  }
+
+  progressJob(job, patch)
 }
 
-async function downloadHls(url, destDir, job, referer) {
+async function downloadHls(url, destDir, job, referer, targetH = null) {
   const origin = new URL(url).origin
   const masterRes = await fetch(url, { headers: reqHeaders(referer || origin) })
   if (!masterRes.ok) throw new Error(`Playlist indisponible (${masterRes.status})`)
@@ -491,11 +688,21 @@ async function downloadHls(url, destDir, job, referer) {
   let playlistUrl = url
   let playlistText = masterText
   let quality = null
+  let nativeH = null
 
   if (master.isMaster && master.variants.length) {
-    const variant = pickVariant(master.variants)
+    let variant
+    if (targetH) {
+      // Toujours télécharger la meilleure variante (source max) pour transcoder
+      // nous-mêmes vers la qualité demandée. Ne pas demander une variante plus
+      // basse au serveur source.
+      variant = pickVariant(master.variants)
+    } else {
+      variant = pickVariant(master.variants)
+    }
     playlistUrl = resolveUrl(url, variant.uri)
     quality = variant.resolution || null
+    nativeH = variantHeight(variant) || null
     const vres = await fetch(playlistUrl, { headers: reqHeaders(referer || origin) })
     if (!vres.ok) throw new Error(`Variant indisponible (${vres.status})`)
     playlistText = await vres.text()
@@ -549,6 +756,27 @@ async function downloadHls(url, destDir, job, referer) {
   // Vérification réelle avec ffprobe (les EXTINF peuvent mentir)
   await assertLongEnough(await probeDuration(join(destDir, 'index.m3u8')), 'Vidéo trop courte')
 
+  // Conversion vers la qualité demandée si la source est plus grande.
+  const srcH = nativeH || (await probeHeight(join(destDir, 'index.m3u8')))
+  if (targetH && srcH && srcH > targetH) {
+    const outName = await transcodeToHeight(join(destDir, 'index.m3u8'), destDir, targetH, job)
+    await rm(segDir, { recursive: true, force: true }).catch(() => {})
+    await rm(join(destDir, 'index.m3u8'), { force: true }).catch(() => {})
+    await rm(join(destDir, 'source.m3u8'), { force: true }).catch(() => {})
+    const fstat = await stat(join(destDir, outName))
+    progressJob(job, {
+      status: 'ready',
+      ratio: 1,
+      downloadedBytes: fstat.size,
+      totalBytes: fstat.size,
+      segments: playlist.segments.length,
+      segmentsTotal: playlist.segments.length,
+      message: null,
+      playUrl: `/dl/${job.key}/${outName}`,
+    })
+    return
+  }
+
   const actual = job.sizes.length === playlist.segments.length
     ? job.sizes.reduce((a, b) => a + b, 0)
     : job.downloadedBytes
@@ -566,7 +794,7 @@ async function downloadHls(url, destDir, job, referer) {
 // Téléchargement fichier direct (mp4/webm...)
 // ---------------------------------------------------------------------------
 
-async function downloadDirect(url, destDir, job, referer) {
+async function downloadDirect(url, destDir, job, referer, targetH = null) {
   const ext = DIRECT_EXT.find((e) => url.toLowerCase().includes(e)) || '.mp4'
   const target = join(destDir, `video${ext}`)
   const res = await fetch(url, { headers: reqHeaders(referer || new URL(url).origin) })
@@ -580,6 +808,23 @@ async function downloadDirect(url, destDir, job, referer) {
 
   // Rejet des fichiers trop courts (intros) si la durée est mesurable
   await assertLongEnough(await probeDuration(target), 'Vidéo trop courte')
+
+  // Conversion vers la qualité demandée si la source est plus grande.
+  const srcH = await probeHeight(target)
+  if (targetH && srcH && srcH > targetH) {
+    const outName = await transcodeToHeight(target, destDir, targetH, job)
+    await rm(target, { force: true }).catch(() => {})
+    const outStat = await stat(join(destDir, outName))
+    progressJob(job, {
+      status: 'ready',
+      downloadedBytes: outStat.size,
+      totalBytes: outStat.size,
+      ratio: 1,
+      message: null,
+      playUrl: `/dl/${job.key}/${outName}`,
+    })
+    return
+  }
 
   progressJob(job, {
     status: 'ready',
@@ -670,19 +915,39 @@ export async function ytdlpDownload(page, destDir, job) {
   })
 }
 
-async function tryYtdlpFallback(pages, key, job) {
+async function tryYtdlpFallback(pages, key, job, targetH = null) {
   if ((process.env.YTDLP_FALLBACK || 'true') === 'false') {
     throw new Error("Aucune source vidéo trouvée pour ce titre sur l'agrégateur.")
   }
   const destDir = folderFor(key)
   let lastErr = null
-  progressJob(job, { downloadedBytes: 0, totalBytes: 0, ratio: 0, segments: 0, segmentsTotal: 0, quality: 'fallback' })
+  progressJob(job, { downloadedBytes: 0, totalBytes: 0, ratio: 0, segments: 0, segmentsTotal: 0, quality: targetH ? `${targetH}p` : 'fallback' })
   for (const page of pages.slice(0, 5)) {
     try {
       progressJob(job, { message: `yt-dlp : essai de ${new URL(page).host}…` })
       const file = await ytdlpDownload(page, destDir, job)
-      const fstat = await stat(join(destDir, file))
-      await assertLongEnough(await probeDuration(join(destDir, file)), 'Vidéo (yt-dlp) trop courte')
+      const srcPath = join(destDir, file)
+      const fstat = await stat(srcPath)
+      await assertLongEnough(await probeDuration(srcPath), 'Vidéo (yt-dlp) trop courte')
+
+      // Conversion vers la qualité demandée si la source est plus grande.
+      const srcH = await probeHeight(srcPath)
+      if (targetH && srcH && srcH > targetH) {
+        const outName = await transcodeToHeight(srcPath, destDir, targetH, job)
+        await rm(srcPath, { force: true }).catch(() => {})
+        const outStat = await stat(join(destDir, outName))
+        progressJob(job, {
+          status: 'ready',
+          downloadedBytes: outStat.size,
+          totalBytes: outStat.size,
+          ratio: 1,
+          quality: `${targetH}p`,
+          message: null,
+          playUrl: `/dl/${key}/${outName}`,
+        })
+        return
+      }
+
       progressJob(job, {
         status: 'ready',
         downloadedBytes: fstat.size,
@@ -707,8 +972,11 @@ async function tryYtdlpFallback(pages, key, job) {
 // Orchestration
 // ---------------------------------------------------------------------------
 
-export async function startDownload(type, id, season, episode) {
-  const key = pathKey(type, id, season, episode)
+export async function startDownload(type, id, season, episode, quality) {
+  // La source est toujours téléchargée en qualité maximale, une seule fois.
+  // Les qualités inférieures sont obtenues par transcodage du fichier local
+  // (voir getStreamStatus). `quality` est donc ignoré au téléchargement.
+  const key = pathKey(type, id, season, episode, quality)
 
   if (jobs.has(key)) return getStatus(key)
   if (await hasIndexFile(key)) return getStatus(key)
@@ -734,19 +1002,18 @@ export async function startDownload(type, id, season, episode) {
     segments: 0,
     segmentsTotal: 0,
     sizes: [],
-    knownTotal: false,
     playUrl: null,
   }
   jobs.set(key, job)
 
-  startDownloadAsync(type, id, season, episode, key, job).catch((err) => {
+  startDownloadAsync(type, id, season, episode, key, job, null).catch((err) => {
     progressJob(job, { status: 'error', error: err.message })
   })
 
   return getStatus(key)
 }
 
-async function startDownloadAsync(type, id, season, episode, key, job) {
+async function startDownloadAsync(type, id, season, episode, key, job, targetH = null) {
   let lastErr = null
   try {
     const meta = await fetchAggregate(type, id, season, episode)
@@ -767,7 +1034,7 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
     }
     if (!candidates.length) {
       // Ultime recours : yt-dlp sur les pages embed.
-      await tryYtdlpFallback(pages, key, job)
+      await tryYtdlpFallback(pages, key, job, targetH)
       return
     }
 
@@ -787,11 +1054,11 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
         const isMp4 = ctype.includes('video') || buf.length > 11 && buf.readUInt32BE(4) === 0x66747970 /* ftyp */
 
         if (isM3U8) {
-          await downloadHls(url, folderFor(key), job, referer)
+          await downloadHls(url, folderFor(key), job, referer, targetH)
           return
         }
         if (isMp4) {
-          await downloadDirect(url, folderFor(key), job, referer)
+          await downloadDirect(url, folderFor(key), job, referer, targetH)
           return
         }
         throw new Error('format non reconnu')
@@ -807,7 +1074,7 @@ async function startDownloadAsync(type, id, season, episode, key, job) {
     // Tous les candidats ont échoué (intros trop courtes, formats, 403...) :
     // dernier espoir, on laisse yt-dlp tenter sa chance sur les pages embed.
     if (pages.length) {
-      await tryYtdlpFallback(pages, key, job)
+      await tryYtdlpFallback(pages, key, job, targetH)
       return
     }
     throw new Error(`Aucune source exploitable. ${lastErr ? `Dernière erreur : ${lastErr.message}` : ''}`.trim())

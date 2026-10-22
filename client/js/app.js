@@ -408,6 +408,16 @@ async function renderTitle(type, id) {
 /* ------------------------------------------------------------------ */
 
 let watchToken = 0
+let currentTeardown = null
+
+function teardownPlayer() {
+  if (currentTeardown) {
+    currentTeardown()
+    currentTeardown = null
+  }
+}
+
+window.addEventListener('hashchange', teardownPlayer)
 
 function fmtTime(sec) {
   if (!Number.isFinite(sec)) return '0:00'
@@ -431,7 +441,10 @@ function bindPlayer(video, src) {
     if (hls) { hls.destroy(); hls = null }
   }
 
-  if (window.Hls && Hls.isSupported()) {
+  const isHls = /\.m3u8(\?|$)/i.test(String(src || ''))
+  if (!isHls) {
+    video.src = src
+  } else if (window.Hls && Hls.isSupported()) {
     hls = new Hls({ enableWorker: true, maxBufferLength: 90 })
     hls.loadSource(src)
     hls.attachMedia(video)
@@ -506,6 +519,8 @@ function bindPlayer(video, src) {
 
 async function renderWatch(type, id, opts = {}) {
   const token = ++watchToken
+  teardownPlayer()
+
   if (!state.user) {
     const cfg = await api.config().catch(() => ({ requireAuthToWatch: true }))
     if (token !== watchToken) return
@@ -533,6 +548,7 @@ async function renderWatch(type, id, opts = {}) {
 
   const isTv = type === 'tv'
   const label = isTv ? `S${opts.season}E${opts.episode}` : null
+  const quality = opts.quality || 'max'
 
   app.innerHTML = `
     <div class="watch-page">
@@ -540,6 +556,15 @@ async function renderWatch(type, id, opts = {}) {
         <div class="player-topbar">
           <a class="btn btn-ghost" href="#/title/${type}/${id}">${ICONS.back} Retour</a>
           <h2>${escapeHtml(title)}${label ? ` <span class="player-ep">${escapeHtml(label)}</span>` : ''}</h2>
+          <label class="quality-picker">
+            <select id="sel-quality">
+              <option value="max" ${quality === 'max' ? 'selected' : ''}>Max (source)</option>
+              <option value="1080" ${quality === '1080' ? 'selected' : ''}>1080p</option>
+              <option value="720" ${quality === '720' ? 'selected' : ''}>720p</option>
+              <option value="480" ${quality === '480' ? 'selected' : ''}>480p</option>
+              <option value="360" ${quality === '360' ? 'selected' : ''}>360p</option>
+            </select>
+          </label>
         </div>
         <div class="player-screen" id="player-screen">
           <video id="lumo-video" class="lumo-video" preload="auto" playsinline webkit-playsinline></video>
@@ -560,7 +585,6 @@ async function renderWatch(type, id, opts = {}) {
           <button class="ctrl" id="ctl-fullscreen" title="Plein écran">${ICONS.fullscreen}</button>
         </div>
       </div>
-      <p class="muted center watch-hint">${ICONS.download} Les vidéos sont téléchargées en local, puis lues depuis le disque pour une lecture fluide et hors-ligne.</p>
     </div>`
 
   const overlay = document.getElementById('dl-overlay')
@@ -571,8 +595,8 @@ async function renderWatch(type, id, opts = {}) {
     if (st.status === 'ready') {
       overlay.hidden = true
       const video = document.getElementById('lumo-video')
-      const teardown = bindPlayer(video, st.playUrl)
-      window.addEventListener('hashchange', teardown, { once: true })
+      teardownPlayer()
+      currentTeardown = bindPlayer(video, st.playUrl)
     } else if (st.status === 'error') {
       overlay.innerHTML = `
         <div class="dl-card dl-error-card">
@@ -592,6 +616,7 @@ async function renderWatch(type, id, opts = {}) {
           ? [`${fmtBytes(st.downloadedBytes)} · ${st.segments}/${st.segmentsTotal} segments`]
           : [`${fmtBytes(st.downloadedBytes)} téléchargés`]
       if (st.message) parts.push(escapeHtml(st.message))
+      if (st.quality) parts.push(`Qualité : ${escapeHtml(st.quality)}`)
       statsEl.textContent = parts.join(' — ')
     }
   }
@@ -599,7 +624,8 @@ async function renderWatch(type, id, opts = {}) {
   const start = async () => {
     let st
     try {
-      st = await api.dlStart(type, id, opts)
+      await api.dlStart(type, id, { ...opts, quality })
+      st = await api.dlStatus(type, id, { ...opts, quality })
     } catch (err) {
       showStatus({ status: 'error', error: err.message })
       return
@@ -614,7 +640,7 @@ async function renderWatch(type, id, opts = {}) {
       if (token !== watchToken) return
       let st
       try {
-        st = await api.dlStatus(type, id, opts)
+        st = await api.dlStatus(type, id, { ...opts, quality })
       } catch {}
       if (token !== watchToken || !st) return
       showStatus(st)
@@ -623,6 +649,15 @@ async function renderWatch(type, id, opts = {}) {
   }
 
   start()
+
+  const sel = document.getElementById('sel-quality')
+  if (sel) {
+    sel.addEventListener('change', (e) => {
+      teardownPlayer()
+      const nextQ = e.target.value
+      renderWatch(type, id, { ...opts, quality: nextQ })
+    })
+  }
 }
 
 /* ------------------------------------------------------------------ */
